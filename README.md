@@ -43,31 +43,11 @@ Predominantly 3 things are needed:
 - deploy the driver into the cluster (`helm` chart provided with sample
   `values.yaml`)
 
-## Community Guides
-
-- https://jonathangazeley.com/2021/01/05/using-truenas-to-provide-persistent-storage-for-kubernetes/
-- https://www.lisenet.com/2021/moving-to-truenas-and-democratic-csi-for-kubernetes-persistent-storage/
-- https://gist.github.com/admun/4372899f20421a947b7544e5fc9f9117 (migrating
-  from `nfs-client-provisioner` to `democratic-csi`)
-- https://gist.github.com/deefdragon/d58a4210622ff64088bd62a5d8a4e8cc
-  (migrating between storage classes using `velero`)
-- https://github.com/fenio/k8s-truenas (NFS/iSCSI over API with TrueNAS Scale)
-
 ## Node Prep
 
-You should install/configure the requirements for both nfs and iscsi.
+Install the required packages on your Kubernetes cluster nodes based on which storage protocol(s) you plan to use.
 
-### cifs
-
-```bash
-# RHEL / CentOS
-sudo yum install -y cifs-utils
-
-# Ubuntu / Debian
-sudo apt-get install -y cifs-utils
-```
-
-### nfs
+### NFS
 
 ```bash
 # RHEL / CentOS
@@ -184,17 +164,16 @@ Add the followin label to the democratic-csi installation namespace `pod-securit
 kubectl label --overwrite namespace democratic-csi pod-security.kubernetes.io/enforce=privileged
 ```
 
-### nvmeof
+### NVMe-oF
 
 ```bash
-# not required but likely helpful (tools are included in the democratic images
-# so not needed on the host)
+# Install nvme-cli tools (optional - tools are included in democratic-csi images)
 apt-get install -y nvme-cli
 
-# get the nvme fabric modules
+# Install kernel modules
 apt-get install linux-generic
 
-# ensure the nvmeof modules get loaded at boot
+# Ensure NVMe-oF modules load at boot
 cat <<EOF > /etc/modules-load.d/nvme.conf
 nvme
 nvme-tcp
@@ -202,114 +181,20 @@ nvme-fc
 nvme-rdma
 EOF
 
-# load the modules immediately
+# Load modules immediately
 modprobe nvme
 modprobe nvme-tcp
 modprobe nvme-fc
 modprobe nvme-rdma
 
-# nvme has native multipath or can use DM multipath
-# democratic-csi will gracefully handle either configuration
+# Check multipath configuration
+# NVMe supports native multipath or DM multipath
 # RedHat recommends DM multipath (nvme_core.multipath=N)
 cat /sys/module/nvme_core/parameters/multipath
 
-# kernel arg to enable/disable native multipath
+# Set kernel arg to enable/disable native multipath
 nvme_core.multipath=N
 ```
-
-### zfs-local-ephemeral-inline
-
-This `driver` provisions node-local ephemeral storage on a per-pod basis. Each
-node should have an identically named zfs pool created and avaialble to the
-`driver`. Note, this is _NOT_ the same thing as using the docker zfs storage
-driver (although the same pool could be used). No other requirements are
-necessary.
-
-- https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/20190122-csi-inline-volumes.md
-- https://kubernetes-csi.github.io/docs/ephemeral-local-volumes.html
-
-### zfs-local-{dataset,zvol}
-
-This `driver` provisions node-local storage. Each node should have an
-identically named zfs pool created and avaialble to the `driver`. Note, this is
-_NOT_ the same thing as using the docker zfs storage driver (although the same
-pool could be used). Nodes should have the standard `zfs` utilities installed.
-
-In the name of ease-of-use these drivers by default report `MULTI_NODE` support
-(`ReadWriteMany` in k8s) however the volumes will implicity only work on the
-node where originally provisioned. Topology contraints manage this in an
-automated fashion preventing any undesirable behavior. So while you may
-provision `MULTI_NODE` / `RWX` volumes, any workloads using the volume will
-always land on a single node and that node will always be the node where the
-volume is/was provisioned.
-
-### local-hostpath
-
-This `driver` provisions node-local storage. Each node should have an
-identically name folder where volumes will be created.
-
-In the name of ease-of-use these drivers by default report `MULTI_NODE` support
-(`ReadWriteMany` in k8s) however the volumes will implicity only work on the
-node where originally provisioned. Topology contraints manage this in an
-automated fashion preventing any undesirable behavior. So while you may
-provision `MULTI_NODE` / `RWX` volumes, any workloads using the volume will
-always land on a single node and that node will always be the node where the
-volume is/was provisioned.
-
-The nature of this `driver` also prevents the enforcement of quotas. In short
-the requested volume size is generally ignored.
-
-### windows
-
-Support for Windows was introduced in `v1.7.0`. Currently support is limited
-to kubernetes nodes capabale of running `HostProcess` containers. Support was
-tested against `Windows Server 2019` using `rke2-v1.24`. Currently any of the
-`-smb` and `-iscsi` drivers will work. Support for `ntfs` was added to the
-linux nodes as well (using the `ntfs3` driver) so volumes created can be
-utilized by nodes with either operating system (in the case of `cifs` by both
-simultaneously).
-
-If using any `-iscsi` driver be sure your iqns are always fully lower-case by
-default (https://github.com/PowerShell/PowerShell/issues/17306).
-
-Due to current limits in the kubernetes tooling it is not possible to use the
-`local-hostpath` driver but support is implemented in this project and will
-work as soon as kubernetes support is available.
-
-```powershell
-# ensure all updates are installed
-
-# enable the container feature
-Enable-WindowsOptionalFeature -Online -FeatureName Containers –All
-
-# install a HostProcess compatible kubernetes
-
-# smb support
-# If using with Windows based machines you may need to enable guest access
-# (even if you are connecting with credentials)
-Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters AllowInsecureGuestAuth -Value 1
-Restart-Service LanmanWorkstation -Force
-
-# iscsi
-# enable iscsi service and mpio as appropriate
-Get-Service -Name MSiSCSI
-Set-Service -Name MSiSCSI -StartupType Automatic
-Start-Service -Name MSiSCSI
-Get-Service -Name MSiSCSI
-
-# mpio
-Get-WindowsFeature -Name 'Multipath-IO'
-Add-WindowsFeature -Name 'Multipath-IO'
-
-Enable-MSDSMAutomaticClaim -BusType "iSCSI"
-Disable-MSDSMAutomaticClaim -BusType "iSCSI"
-
-Get-MSDSMGlobalDefaultLoadBalancePolicy
-Set-MSDSMGlobalLoadBalancePolicy -Policy RR
-```
-
-- https://kubernetes.io/blog/2021/08/16/windows-hostprocess-containers/
-- https://kubernetes.io/docs/tasks/configure-pod-container/create-hostprocess-pod/
 
 ## Server Prep
 
@@ -397,122 +282,107 @@ Each example includes detailed comments explaining all configuration options.
 ## Helm Installation
 
 ```bash
+# Add the democratic-csi helm repository
 helm repo add democratic-csi https://democratic-csi.github.io/charts/
 helm repo update
-# helm v2
-helm search democratic-csi/
 
-# helm v3
+# Search for available charts
 helm search repo democratic-csi/
 
-# copy proper values file from https://github.com/democratic-csi/charts/tree/master/stable/democratic-csi/examples
-# edit as appropriate
-# examples are from helm v2, alter as appropriate for v3
+# Copy and edit the appropriate values file from examples/
+# - examples/truenas-nfs.yaml
+# - examples/truenas-iscsi.yaml
+# - examples/truenas-nvmeof.yaml
 
-# add --create-namespace for helm v3
-helm upgrade \
---install \
---values freenas-iscsi.yaml \
---namespace democratic-csi \
-zfs-iscsi democratic-csi/democratic-csi
-
-helm upgrade \
---install \
---values freenas-nfs.yaml \
---namespace democratic-csi \
-zfs-nfs democratic-csi/democratic-csi
-```
-
-### A note on non standard kubelet paths
-
-Some distrobutions, such as `minikube` and `microk8s` use a non-standard
-kubelet path. In such cases it is necessary to provide a new kubelet host path,
-microk8s example below:
-
-```bash
-microk8s helm upgrade \
-  --install \
-  --values freenas-nfs.yaml \
-  --set node.kubeletHostPath="/var/snap/microk8s/common/var/lib/kubelet"  \
+# Install NFS driver
+helm upgrade --install \
+  --values truenas-nfs.yaml \
   --namespace democratic-csi \
-  zfs-nfs democratic-csi/democratic-csi
+  --create-namespace \
+  truenas-nfs democratic-csi/democratic-csi
+
+# Install iSCSI driver
+helm upgrade --install \
+  --values truenas-iscsi.yaml \
+  --namespace democratic-csi \
+  --create-namespace \
+  truenas-iscsi democratic-csi/democratic-csi
+
+# Install NVMe-oF driver
+helm upgrade --install \
+  --values truenas-nvmeof.yaml \
+  --namespace democratic-csi \
+  --create-namespace \
+  truenas-nvmeof democratic-csi/democratic-csi
 ```
 
-- microk8s - `/var/snap/microk8s/common/var/lib/kubelet`
-- pivotal - `/var/vcap/data/kubelet`
-- k0s - `/var/lib/k0s/kubelet`
+### Non-Standard Kubelet Paths
 
-### openshift
-
-`democratic-csi` generally works fine with openshift. Some special parameters
-need to be set with helm (support added in chart version `0.6.1`):
+Some distributions, such as `minikube` and `microk8s`, use non-standard
+kubelet paths. In such cases, specify the kubelet host path during installation:
 
 ```bash
-# for sure required
+# microk8s example
+microk8s helm upgrade --install \
+  --values truenas-nfs.yaml \
+  --set node.kubeletHostPath="/var/snap/microk8s/common/var/lib/kubelet" \
+  --namespace democratic-csi \
+  --create-namespace \
+  truenas-nfs democratic-csi/democratic-csi
+```
+
+Common non-standard kubelet paths:
+- **microk8s**: `/var/snap/microk8s/common/var/lib/kubelet`
+- **pivotal**: `/var/vcap/data/kubelet`
+- **k0s**: `/var/lib/k0s/kubelet`
+
+### OpenShift
+
+`democratic-csi` works with OpenShift. Set these parameters during helm installation:
+
+```bash
+# Required parameters
 --set node.rbac.openshift.privileged=true
 --set node.driver.localtimeHostPath=false
 
-# unlikely, but in special circumstances may be required
+# Rarely needed, but may be required in special circumstances
 --set controller.rbac.openshift.privileged=true
 ```
 
 ### Nomad
 
-`democratic-csi` works with Nomad in a functioning but limted capacity. See the
-[Nomad docs](docs/nomad.md) for details.
-
-### Docker Swarm
-
-- https://github.com/moby/moby/blob/master/docs/cluster_volumes.md
-- https://github.com/olljanat/csi-plugins-for-docker-swarm
+`democratic-csi` works with Nomad in a limited capacity. See the [Nomad docs](docs/nomad.md) for details.
 
 ## Multiple Deployments
 
-You may install multiple deployments of each/any driver. It requires the
-following:
+You can install multiple deployments of any driver. Requirements:
 
-- Use a new helm release name for each deployment
-- Make sure you have a unique `csiDriver.name` in the values file (within the
-  same cluster)
-- Use unqiue names for your storage classes (per cluster)
-- Use a unique parent dataset (ie: don't try to use the same parent across
-  deployments or clusters)
-- For `iscsi` and `smb` be aware that the names of assets/shares are _global_
-  and so collisions are possible/probable. Appropriate use of the respective
-  `nameTemplate`, `namePrefix`, and `nameSuffix` configuration options will
-  mitigate the issue [#210](https://github.com/democratic-csi/democratic-csi/issues/210).
+- Use a unique helm release name for each deployment
+- Set a unique `csiDriver.name` in the values file (per cluster)
+- Use unique storage class names (per cluster)
+- Use a unique parent dataset for each deployment
+- For `iscsi` and `nvmeof`, asset/share names are global - use `nameTemplate`, `namePrefix`, and `nameSuffix` to avoid collisions
 
 # Snapshot Support
 
-Install snapshot controller (once per cluster):
+Install the snapshot controller once per cluster:
 
+**Option 1**: Use the democratic-csi chart
 - https://github.com/democratic-csi/charts/tree/master/stable/snapshot-controller
 
-OR
-
+**Option 2**: Use the upstream kubernetes-csi snapshotter
 - https://github.com/kubernetes-csi/external-snapshotter/tree/master/client/config/crd
 - https://github.com/kubernetes-csi/external-snapshotter/tree/master/deploy/kubernetes/snapshot-controller
 
-Install `democratic-csi` as usual with `volumeSnapshotClasses` defined as appropriate.
+Then install `democratic-csi` with `volumeSnapshotClasses` defined in your values file.
 
+**Resources:**
 - https://kubernetes.io/docs/concepts/storage/volume-snapshots/
 - https://github.com/kubernetes-csi/external-snapshotter#usage
-- https://github.com/democratic-csi/democratic-csi/issues/129#issuecomment-961489810
 
-# Migrating from freenas-provisioner and freenas-iscsi-provisioner
+# Additional Resources
 
-It is possible to migrate all volumes from the non-csi freenas provisioners
-to `democratic-csi`.
-
-Copy the `contrib/freenas-provisioner-to-democratic-csi.sh` script from the
-project to your workstation, read the script in detail, and edit the variables
-to your needs to start migrating!
-
-# Related
-
-- https://github.com/nmaupu/freenas-provisioner
-- https://github.com/travisghansen/freenas-iscsi-provisioner
-- https://datamattsson.tumblr.com/post/624751011659202560/welcome-truenas-core-container-storage-provider
-- https://github.com/dravanet/truenas-csi
-- https://github.com/SynologyOpenSource/synology-csi
-- https://github.com/openebs/zfs-localpv
+- [TrueNAS SCALE 25.04 API Documentation](https://api.truenas.com/v25.04.2/jsonrpc.html)
+- [TrueNAS API Client Reference](https://github.com/truenas/api_client)
+- [Kubernetes CSI Documentation](https://kubernetes-csi.github.io/docs/)
+- [democratic-csi Charts Repository](https://github.com/democratic-csi/charts)
