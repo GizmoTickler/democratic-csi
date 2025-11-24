@@ -462,6 +462,368 @@ class Api {
       value: String(value),
     }));
   }
+
+  // ============================================================================
+  // NFS SHARE MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Create an NFS share
+   * @param {object} data - NFS share configuration
+   */
+  async NFSShareCreate(data) {
+    return await this.call("sharing.nfs.create", [data]);
+  }
+
+  /**
+   * Query NFS shares
+   * @param {array} filters - Query filters
+   */
+  async NFSShareQuery(filters = []) {
+    return await this.query("sharing.nfs.query", filters);
+  }
+
+  /**
+   * Update an NFS share
+   * @param {number} id - Share ID
+   * @param {object} data - Updated configuration
+   */
+  async NFSShareUpdate(id, data) {
+    return await this.call("sharing.nfs.update", [id, data]);
+  }
+
+  /**
+   * Delete an NFS share
+   * @param {number} id - Share ID
+   */
+  async NFSShareDelete(id) {
+    try {
+      await this.call("sharing.nfs.delete", [id]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Find NFS share by path
+   * @param {string} path - Mount path to search for
+   */
+  async NFSShareFindByPath(path) {
+    return await this.findResourceByProperties("sharing.nfs.query", (item) => {
+      return item.path === path || (item.paths && item.paths.includes(path));
+    });
+  }
+
+  // ============================================================================
+  // SMB SHARE MANAGEMENT (deprecated - will be removed)
+  // ============================================================================
+
+  /**
+   * SMB is not supported in this TrueNAS-only version
+   * Use NFS or iSCSI instead
+   */
+  async SMBShareCreate(data) {
+    throw new Error("SMB shares are not supported. Use NFS or iSCSI instead.");
+  }
+
+  // ============================================================================
+  // iSCSI MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Query iSCSI targets
+   * @param {array} filters - Query filters
+   */
+  async ISCSITargetQuery(filters = []) {
+    return await this.query("iscsi.target.query", filters);
+  }
+
+  /**
+   * Create an iSCSI target
+   * @param {object} data - Target configuration
+   */
+  async ISCSITargetCreate(data) {
+    return await this.call("iscsi.target.create", [data]);
+  }
+
+  /**
+   * Update an iSCSI target
+   * @param {number} id - Target ID
+   * @param {object} data - Updated configuration
+   */
+  async ISCSITargetUpdate(id, data) {
+    return await this.call("iscsi.target.update", [id, data]);
+  }
+
+  /**
+   * Delete an iSCSI target
+   * @param {number} id - Target ID
+   * @param {boolean} force - Force deletion
+   */
+  async ISCSITargetDelete(id, force = false) {
+    try {
+      await this.call("iscsi.target.delete", [id, force]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query iSCSI extents
+   * @param {array} filters - Query filters
+   */
+  async ISCSIExtentQuery(filters = []) {
+    return await this.query("iscsi.extent.query", filters);
+  }
+
+  /**
+   * Create an iSCSI extent
+   * @param {object} data - Extent configuration
+   */
+  async ISCSIExtentCreate(data) {
+    return await this.call("iscsi.extent.create", [data]);
+  }
+
+  /**
+   * Update an iSCSI extent
+   * @param {number} id - Extent ID
+   * @param {object} data - Updated configuration
+   */
+  async ISCSIExtentUpdate(id, data) {
+    return await this.call("iscsi.extent.update", [id, data]);
+  }
+
+  /**
+   * Delete an iSCSI extent
+   * @param {number} id - Extent ID
+   * @param {boolean} remove - Remove underlying file/zvol
+   * @param {boolean} force - Force deletion
+   */
+  async ISCSIExtentDelete(id, remove = false, force = false) {
+    try {
+      await this.call("iscsi.extent.delete", [id, remove, force]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query iSCSI target-to-extent associations
+   * @param {array} filters - Query filters
+   */
+  async ISCSITargetExtentQuery(filters = []) {
+    return await this.query("iscsi.targetextent.query", filters);
+  }
+
+  /**
+   * Create an iSCSI target-to-extent association
+   * @param {object} data - Association configuration
+   */
+  async ISCSITargetExtentCreate(data) {
+    return await this.call("iscsi.targetextent.create", [data]);
+  }
+
+  /**
+   * Update an iSCSI target-to-extent association
+   * @param {number} id - Association ID
+   * @param {object} data - Updated configuration
+   */
+  async ISCSITargetExtentUpdate(id, data) {
+    return await this.call("iscsi.targetextent.update", [id, data]);
+  }
+
+  /**
+   * Delete an iSCSI target-to-extent association
+   * @param {number} id - Association ID
+   * @param {boolean} force - Force deletion
+   */
+  async ISCSITargetExtentDelete(id, force = false) {
+    try {
+      await this.call("iscsi.targetextent.delete", [id, force]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query iSCSI portals
+   * @param {array} filters - Query filters
+   */
+  async ISCSIPortalQuery(filters = []) {
+    return await this.query("iscsi.portal.query", filters);
+  }
+
+  /**
+   * Query iSCSI initiators
+   * @param {array} filters - Query filters
+   */
+  async ISCSIInitiatorQuery(filters = []) {
+    return await this.query("iscsi.initiator.query", filters);
+  }
+
+  /**
+   * Get iSCSI global configuration
+   */
+  async ISCSIGlobalConfigGet() {
+    return await this.call("iscsi.global.config");
+  }
+
+  /**
+   * Update iSCSI global configuration
+   * @param {object} data - Configuration updates
+   */
+  async ISCSIGlobalConfigUpdate(data) {
+    return await this.call("iscsi.global.update", [data]);
+  }
+
+  // ============================================================================
+  // NVMe-oF MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Query NVMe-oF subsystems
+   * @param {array} filters - Query filters
+   */
+  async NVMeOFSubsystemQuery(filters = []) {
+    return await this.query("nvmeof.subsystem.query", filters);
+  }
+
+  /**
+   * Create an NVMe-oF subsystem
+   * @param {object} data - Subsystem configuration
+   */
+  async NVMeOFSubsystemCreate(data) {
+    return await this.call("nvmeof.subsystem.create", [data]);
+  }
+
+  /**
+   * Update an NVMe-oF subsystem
+   * @param {number} id - Subsystem ID
+   * @param {object} data - Updated configuration
+   */
+  async NVMeOFSubsystemUpdate(id, data) {
+    return await this.call("nvmeof.subsystem.update", [id, data]);
+  }
+
+  /**
+   * Delete an NVMe-oF subsystem
+   * @param {number} id - Subsystem ID
+   */
+  async NVMeOFSubsystemDelete(id) {
+    try {
+      await this.call("nvmeof.subsystem.delete", [id]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query NVMe-oF namespaces
+   * @param {array} filters - Query filters
+   */
+  async NVMeOFNamespaceQuery(filters = []) {
+    return await this.query("nvmeof.namespace.query", filters);
+  }
+
+  /**
+   * Create an NVMe-oF namespace
+   * @param {object} data - Namespace configuration
+   */
+  async NVMeOFNamespaceCreate(data) {
+    return await this.call("nvmeof.namespace.create", [data]);
+  }
+
+  /**
+   * Update an NVMe-oF namespace
+   * @param {number} id - Namespace ID
+   * @param {object} data - Updated configuration
+   */
+  async NVMeOFNamespaceUpdate(id, data) {
+    return await this.call("nvmeof.namespace.update", [id, data]);
+  }
+
+  /**
+   * Delete an NVMe-oF namespace
+   * @param {number} id - Namespace ID
+   */
+  async NVMeOFNamespaceDelete(id) {
+    try {
+      await this.call("nvmeof.namespace.delete", [id]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query NVMe-oF hosts
+   * @param {array} filters - Query filters
+   */
+  async NVMeOFHostQuery(filters = []) {
+    return await this.query("nvmeof.host.query", filters);
+  }
+
+  /**
+   * Create an NVMe-oF host
+   * @param {object} data - Host configuration
+   */
+  async NVMeOFHostCreate(data) {
+    return await this.call("nvmeof.host.create", [data]);
+  }
+
+  /**
+   * Delete an NVMe-oF host
+   * @param {number} id - Host ID
+   */
+  async NVMeOFHostDelete(id) {
+    try {
+      await this.call("nvmeof.host.delete", [id]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Query NVMe-oF ports
+   * @param {array} filters - Query filters
+   */
+  async NVMeOFPortQuery(filters = []) {
+    return await this.query("nvmeof.port.query", filters);
+  }
+
+  /**
+   * Get NVMe-oF listener addresses
+   */
+  async NVMeOFGetListenerAddresses() {
+    return await this.call("nvmeof.get_listener_addresses");
+  }
 }
 
 module.exports.Api = Api;
