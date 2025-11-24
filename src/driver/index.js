@@ -33,6 +33,7 @@ class CsiBaseDriver {
   constructor(ctx, options) {
     this.ctx = ctx;
     this.options = options || {};
+    this.cleanup = [];
 
     if (!this.options.hasOwnProperty("node")) {
       this.options.node = {};
@@ -49,6 +50,10 @@ class CsiBaseDriver {
     if (!this.options.node.mount.hasOwnProperty("checkFilesystem")) {
       this.options.node.mount.checkFilesystem = {};
     }
+  }
+
+  getCleanupHandlers() {
+    return this.cleanup;
   }
 
   /**
@@ -550,14 +555,14 @@ class CsiBaseDriver {
     return volume_id;
   }
 
-  async GetPluginInfo(call) {
+  async GetPluginInfo(callContext, call) {
     return {
       name: this.ctx.args.csiName,
       vendor_version: this.ctx.args.version,
     };
   }
 
-  async GetPluginCapabilities(call) {
+  async GetPluginCapabilities(callContext, call) {
     let capabilities;
     const response = {
       capabilities: [],
@@ -642,11 +647,11 @@ class CsiBaseDriver {
     return response;
   }
 
-  async Probe(call) {
+  async Probe(callContext, call) {
     return { ready: { value: true } };
   }
 
-  async ControllerGetCapabilities(call) {
+  async ControllerGetCapabilities(callContext, call) {
     let capabilities;
     const response = {
       capabilities: [],
@@ -689,7 +694,7 @@ class CsiBaseDriver {
     return response;
   }
 
-  async NodeGetCapabilities(call) {
+  async NodeGetCapabilities(callContext, call) {
     let capabilities;
     const response = {
       capabilities: [],
@@ -714,7 +719,7 @@ class CsiBaseDriver {
     return response;
   }
 
-  async NodeGetInfo(call) {
+  async NodeGetInfo(callContext, call) {
     return {
       node_id: process.env.CSI_NODE_ID || os.hostname(),
       max_volumes_per_node: 0,
@@ -731,7 +736,7 @@ class CsiBaseDriver {
    *
    * @param {*} call
    */
-  async NodeStageVolume(call) {
+  async NodeStageVolume(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();
@@ -1577,6 +1582,13 @@ class CsiBaseDriver {
                     case "ext3":
                     case "ext4":
                     case "ext4dev":
+                      /**
+                       * Skip the automatic block‐discard (TRIM) phase so mkfs doesn’t
+                       * wait on the storage backend to zero/free every block. On many
+                       * iSCSI or thin‐provisioned volumes the discard step can stall
+                       * mkfs for minutes—`-E nodiscard` makes the format finish immediately.
+                       */
+                      formatOptions.unshift("-E", "nodiscard");
                       // disable reserved blocks in this scenario
                       formatOptions.unshift("-m", "0");
                       break;
@@ -2517,7 +2529,7 @@ class CsiBaseDriver {
    *
    * @param {*} call
    */
-  async NodeUnstageVolume(call) {
+  async NodeUnstageVolume(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();
@@ -3049,7 +3061,7 @@ class CsiBaseDriver {
     return {};
   }
 
-  async NodePublishVolume(call) {
+  async NodePublishVolume(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();
@@ -3370,7 +3382,7 @@ class CsiBaseDriver {
     }
   }
 
-  async NodeUnpublishVolume(call) {
+  async NodeUnpublishVolume(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();
@@ -3538,7 +3550,7 @@ class CsiBaseDriver {
     return {};
   }
 
-  async NodeGetVolumeStats(call) {
+  async NodeGetVolumeStats(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();
@@ -3776,7 +3788,7 @@ class CsiBaseDriver {
    *
    * @param {*} call
    */
-  async NodeExpandVolume(call) {
+  async NodeExpandVolume(callContext, call) {
     const driver = this;
     const mount = driver.getDefaultMountInstance();
     const filesystem = driver.getDefaultFilesystemInstance();

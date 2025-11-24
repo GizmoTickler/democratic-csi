@@ -25,10 +25,12 @@ class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
   getExecClient() {
     return this.ctx.registry.get(`${__REGISTRY_NS__}:exec_client`, () => {
       if (this.options.sshConnection) {
-        return new SshClient({
+        const sshClient = new SshClient({
           logger: this.ctx.logger,
           connection: this.options.sshConnection,
         });
+        this.cleanup.push(() => sshClient.finalize());
+        return sshClient;
       } else {
         return new LocalCliExecClient({
           logger: this.ctx.logger,
@@ -48,6 +50,17 @@ class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
       }
       options.idempotent = true;
       options.sudo = _.get(this.options, "zfs.cli.sudoEnabled", false);
+      const sudoEnabledCommands = _.get(
+        this.options,
+        "zfs.cli.sudoEnabledCommands"
+      );
+      if (sudoEnabledCommands && Array.isArray(sudoEnabledCommands)) {
+        options.sudo = {};
+        sudoEnabledCommands.forEach((command) => {
+          options.sudo[command] = true;
+        });
+      }
+
       if (typeof this.setZetabyteCustomOptions === "function") {
         await this.setZetabyteCustomOptions(options);
       }
@@ -104,7 +117,7 @@ class ControllerZfsGenericDriver extends ControllerZfsBaseDriver {
    *
    * @param {*} datasetName
    */
-  async createShare(call, datasetName) {
+  async createShare(callContext, call, datasetName) {
     const driver = this;
     const zb = await this.getZetabyte();
     const execClient = this.getExecClient();
@@ -309,7 +322,7 @@ create /backstores/block/${assetName}
 
         // iqn = target
         let iqn = basename + ":" + assetName;
-        this.ctx.logger.info("iqn: " + iqn);
+        callContext.logger.info("iqn: " + iqn);
 
         // store this off to make delete process more bullet proof
         await zb.zfs.set(datasetName, {
@@ -534,7 +547,7 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
 
         // iqn = target
         let nqn = basename + ":" + assetName;
-        this.ctx.logger.info("nqn: " + nqn);
+        callContext.logger.info("nqn: " + nqn);
 
         // store this off to make delete process more bullet proof
         await zb.zfs.set(datasetName, {
@@ -561,7 +574,7 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
     }
   }
 
-  async deleteShare(call, datasetName) {
+  async deleteShare(callContext, call, datasetName) {
     const zb = await this.getZetabyte();
     const execClient = this.getExecClient();
 
@@ -646,7 +659,7 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
         }
 
         properties = properties[datasetName];
-        this.ctx.logger.debug("zfs props data: %j", properties);
+        callContext.logger.debug("zfs props data: %j", properties);
 
         assetName = properties[ISCSI_ASSETS_NAME_PROPERTY_NAME].value;
 
@@ -718,7 +731,7 @@ delete ${assetName}
         }
 
         properties = properties[datasetName];
-        this.ctx.logger.debug("zfs props data: %j", properties);
+        callContext.logger.debug("zfs props data: %j", properties);
 
         assetName = properties[NVMEOF_ASSETS_NAME_PROPERTY_NAME].value;
 
@@ -836,7 +849,7 @@ save_config filename=${this.options.nvmeof.shareStrategySpdkCli.configPath}
     return {};
   }
 
-  async expandVolume(call, datasetName) {
+  async expandVolume(callContext, call, datasetName) {
     switch (this.options.driver) {
       case "zfs-generic-nfs":
         break;
