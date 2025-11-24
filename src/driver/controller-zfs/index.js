@@ -171,14 +171,30 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     return zb.options.paths.sudo || "/usr/bin/sudo";
   }
 
-  getDatasetParentName() {
-    let datasetParentName = this.options.zfs.datasetParentName;
+  getDatasetParentName(call = null) {
+    let datasetParentName;
+
+    // First check if datasetParentName is provided in storage class parameters
+    if (call && call.request && call.request.parameters) {
+      const paramDatasetParentName = this.getNormalizedParameterValue(
+        call.request.parameters,
+        "datasetParentName"
+      );
+      if (paramDatasetParentName) {
+        datasetParentName = paramDatasetParentName;
+      }
+    }
+
+    // Fallback to configuration option
+    if (!datasetParentName) {
+      datasetParentName = this.options.zfs.datasetParentName;
+    }
     datasetParentName = datasetParentName.replace(/\/$/, "");
     return datasetParentName;
   }
 
-  getVolumeParentDatasetName() {
-    let datasetParentName = this.getDatasetParentName();
+  getVolumeParentDatasetName(call = null) {
+    let datasetParentName = this.getDatasetParentName(call);
     //datasetParentName += "/v";
     datasetParentName = datasetParentName.replace(/\/$/, "");
     return datasetParentName;
@@ -251,9 +267,9 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     return access_modes;
   }
 
-  assertCapabilities(capabilities) {
+  assertCapabilities(callContext, capabilities) {
     const driverZfsResourceType = this.getDriverZfsResourceType();
-    this.ctx.logger.verbose("validating capabilities: %j", capabilities);
+    callContext.logger.verbose("validating capabilities: %j", capabilities);
 
     let message = null;
     //[{"access_mode":{"mode":"SINGLE_NODE_WRITER"},"mount":{"mount_flags":["noatime","_netdev"],"fs_type":"nfs"},"access_type":"mount"}]
@@ -352,6 +368,8 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     const zb = await this.getZetabyte();
     const driverZfsResourceType = this.getDriverZfsResourceType();
     let datasetName = this.getVolumeParentDatasetName();
+    // we do not support dynamic parent dataset for ListVolumes yet
+    // let datasetName = this.getVolumeParentDatasetName(call);
 
     // ignore rows were csi_name is empty
     if (row[MANAGED_PROPERTY_NAME] != "true") {
@@ -563,11 +581,11 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async Probe(call) {
+  async Probe(callContext, call) {
     const driver = this;
 
     if (driver.ctx.args.csiMode.includes("controller")) {
-      let datasetParentName = this.getVolumeParentDatasetName() + "/";
+      let datasetParentName = this.getVolumeParentDatasetName(call) + "/";
       let snapshotParentDatasetName =
         this.getDetachedSnapshotParentDatasetName() + "/";
       if (
@@ -591,7 +609,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
        */
       if (!driver.currentExecShell || timerEnabled === false) {
         const execClient = this.getExecClient();
-        driver.ctx.logger.debug("performing exec sanity check..");
+        callContext.logger.debug("performing exec sanity check..");
         const response = await execClient.exec("echo $0");
         driver.currentExecShell = response.stdout.split("\n")[0];
       }
@@ -635,7 +653,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async CreateVolume(call) {
+  async CreateVolume(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const execClient = this.getExecClient();
@@ -699,7 +717,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       pvcOptions,
     ]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let snapshotParentDatasetName = this.getDetachedSnapshotParentDatasetName();
     let zvolBlocksize = driverOptions.zfs.zvolBlocksize || "16K";
     let name = call.request.name;
@@ -717,7 +735,10 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       call.request.volume_capabilities &&
       call.request.volume_capabilities.length > 0
     ) {
-      const result = this.assertCapabilities(call.request.volume_capabilities);
+      const result = this.assertCapabilities(
+        callContext,
+        call.request.volume_capabilities
+      );
       if (result.valid !== true) {
         throw new GrpcError(grpc.status.INVALID_ARGUMENT, result.message);
       }
@@ -852,7 +873,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     if (driverZfsResourceType == "volume") {
       let extentDiskName = "zvol/" + datasetName;
       let maxZvolNameLength = await driver.getMaxZvolNameLength();
-      driver.ctx.logger.debug("max zvol name length: %s", maxZvolNameLength);
+      callContext.logger.debug("max zvol name length: %s", maxZvolNameLength);
 
       if (extentDiskName.length > maxZvolNameLength) {
         throw new GrpcError(
@@ -944,7 +965,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
               volume_id;
           }
 
-          driver.ctx.logger.debug("full snapshot name: %s", fullSnapshotName);
+          callContext.logger.debug("full snapshot name: %s", fullSnapshotName);
 
           if (!zb.helpers.isZfsSnapshot(volume_content_source_snapshot_id)) {
             try {
@@ -1058,7 +1079,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
             VOLUME_SOURCE_CLONE_SNAPSHOT_PREFIX +
             volume_id;
 
-          driver.ctx.logger.debug("full snapshot name: %s", fullSnapshotName);
+          callContext.logger.debug("full snapshot name: %s", fullSnapshotName);
 
           // create snapshot
           try {
@@ -1191,7 +1212,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
           VOLUME_CONTENT_SOURCE_ID_PROPERTY_NAME,
         ]);
         properties = properties[datasetName];
-        driver.ctx.logger.debug("zfs props data: %j", properties);
+        callContext.logger.debug("zfs props data: %j", properties);
 
         // set mode
         if (driverOptions.zfs.datasetPermissionsMode) {
@@ -1233,7 +1254,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
               command = (await this.getSudoPath()) + " " + command;
             }
 
-            driver.ctx.logger.verbose("set acl command: %s", command);
+            callContext.logger.verbose("set acl command: %s", command);
             response = await execClient.exec(command);
             if (response.code != 0) {
               throw new GrpcError(
@@ -1330,12 +1351,12 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async DeleteVolume(call) {
+  async DeleteVolume(callContext, call) {
     const driver = this;
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let name = call.request.volume_id;
 
     if (!datasetParentName) {
@@ -1376,7 +1397,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       }
     }
 
-    driver.ctx.logger.debug("dataset properties: %j", properties);
+    callContext.logger.debug("dataset properties: %j", properties);
 
     // deleteStrategy
     const delete_strategy = _.get(
@@ -1401,7 +1422,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
         .extractSnapshotName(properties.origin.value)
         .startsWith(VOLUME_SOURCE_CLONE_SNAPSHOT_PREFIX)
     ) {
-      driver.ctx.logger.debug(
+      callContext.logger.debug(
         "removing with defer source snapshot: %s",
         properties.origin.value
       );
@@ -1499,13 +1520,13 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async ControllerExpandVolume(call) {
+  async ControllerExpandVolume(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let name = call.request.volume_id;
 
     if (!datasetParentName) {
@@ -1619,12 +1640,12 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async GetCapacity(call) {
+  async GetCapacity(callContext, call) {
     const driver = this;
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
 
     if (!datasetParentName) {
       throw new GrpcError(
@@ -1634,7 +1655,10 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     }
 
     if (call.request.volume_capabilities) {
-      const result = this.assertCapabilities(call.request.volume_capabilities);
+      const result = this.assertCapabilities(
+        callContext,
+        call.request.volume_capabilities
+      );
 
       if (result.valid !== true) {
         return { available_capacity: 0 };
@@ -1669,13 +1693,13 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async ControllerGetVolume(call) {
+  async ControllerGetVolume(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let response;
     let name = call.request.volume_id;
 
@@ -1733,7 +1757,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       throw err;
     }
 
-    driver.ctx.logger.debug("list volumes result: %j", response);
+    callContext.logger.debug("list volumes result: %j", response);
     let volume = await driver.populateCsiVolumeFromData(response.indexed[0]);
     let status = await driver.getVolumeStatus(datasetName);
 
@@ -1751,13 +1775,13 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async ListVolumes(call) {
+  async ListVolumes(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let entries = [];
     let entries_length = 0;
     let next_token;
@@ -1849,7 +1873,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       throw err;
     }
 
-    driver.ctx.logger.debug("list volumes result: %j", response);
+    callContext.logger.debug("list volumes result: %j", response);
 
     // remove parent dataset from results
     if (driverZfsResourceType == "filesystem") {
@@ -1892,7 +1916,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async ListSnapshots(call) {
+  async ListSnapshots(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const zb = await this.getZetabyte();
@@ -1908,7 +1932,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
 
     let types = [];
 
-    const volumeParentDatasetName = this.getVolumeParentDatasetName();
+    const volumeParentDatasetName = this.getVolumeParentDatasetName(call);
     const snapshotParentDatasetName =
       this.getDetachedSnapshotParentDatasetName();
 
@@ -2147,7 +2171,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async CreateSnapshot(call) {
+  async CreateSnapshot(callContext, call) {
     const driver = this;
     const driverZfsResourceType = this.getDriverZfsResourceType();
     const zb = await this.getZetabyte();
@@ -2168,7 +2192,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     } catch (e) {}
 
     let response;
-    const volumeParentDatasetName = this.getVolumeParentDatasetName();
+    const volumeParentDatasetName = this.getVolumeParentDatasetName(call);
     let datasetParentName;
     let snapshotProperties = {};
     let types = [];
@@ -2181,7 +2205,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
         types.push("volume");
       }
     } else {
-      datasetParentName = this.getVolumeParentDatasetName();
+      datasetParentName = this.getVolumeParentDatasetName(call);
       types.push("snapshot");
     }
 
@@ -2230,7 +2254,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       source_volume_id;
     snapshotProperties[MANAGED_PROPERTY_NAME] = "true";
 
-    driver.ctx.logger.verbose("requested snapshot name: %s", name);
+    callContext.logger.verbose("requested snapshot name: %s", name);
 
     let invalid_chars;
     invalid_chars = name.match(/[^a-z0-9_\-:.+]+/gi);
@@ -2247,7 +2271,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     // https://stackoverflow.com/questions/32106243/regex-to-remove-all-non-alpha-numeric-and-replace-spaces-with/32106277
     name = name.replace(/[^a-z0-9_\-:.+]+/gi, "");
 
-    driver.ctx.logger.verbose("cleansed snapshot name: %s", name);
+    callContext.logger.verbose("cleansed snapshot name: %s", name);
 
     // check for other snapshopts with the same name on other volumes and fail as appropriate
     {
@@ -2306,7 +2330,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       fullSnapshotName = datasetName + "@" + name;
     }
 
-    driver.ctx.logger.verbose("full snapshot name: %s", fullSnapshotName);
+    callContext.logger.verbose("full snapshot name: %s", fullSnapshotName);
 
     if (detachedSnapshot) {
       tmpSnapshotName =
@@ -2414,7 +2438,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       { types }
     );
     properties = properties[fullSnapshotName];
-    driver.ctx.logger.verbose("snapshot properties: %j", properties);
+    callContext.logger.verbose("snapshot properties: %j", properties);
 
     // TODO: properly handle use-case where datasetEnableQuotas is not turned on
     if (driverZfsResourceType == "filesystem") {
@@ -2469,7 +2493,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async DeleteSnapshot(call) {
+  async DeleteSnapshot(callContext, call) {
     const driver = this;
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
@@ -2489,7 +2513,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
     if (detachedSnapshot) {
       datasetParentName = this.getDetachedSnapshotParentDatasetName();
     } else {
-      datasetParentName = this.getVolumeParentDatasetName();
+      datasetParentName = this.getVolumeParentDatasetName(call);
     }
 
     if (!datasetParentName) {
@@ -2501,7 +2525,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
 
     const fullSnapshotName = datasetParentName + "/" + snapshot_id;
 
-    driver.ctx.logger.verbose("deleting snapshot: %s", fullSnapshotName);
+    callContext.logger.verbose("deleting snapshot: %s", fullSnapshotName);
 
     try {
       await zb.zfs.destroy(fullSnapshotName, {
@@ -2541,7 +2565,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
    *
    * @param {*} call
    */
-  async ValidateVolumeCapabilities(call) {
+  async ValidateVolumeCapabilities(callContext, call) {
     const driver = this;
     const zb = await this.getZetabyte();
     const driverOptions = driver.getMergedDriverOptions([]);
@@ -2556,7 +2580,7 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       throw new GrpcError(grpc.status.INVALID_ARGUMENT, `missing capabilities`);
     }
 
-    let datasetParentName = this.getVolumeParentDatasetName();
+    let datasetParentName = this.getVolumeParentDatasetName(call);
     let name = volume_id;
 
     if (!datasetParentName) {
@@ -2580,7 +2604,10 @@ class ControllerZfsBaseDriver extends CsiBaseDriver {
       }
     }
 
-    const result = this.assertCapabilities(call.request.volume_capabilities);
+    const result = this.assertCapabilities(
+      callContext,
+      call.request.volume_capabilities
+    );
 
     if (result.valid !== true) {
       return { message: result.message };
