@@ -1,16 +1,25 @@
-
 const { sleep, stringify } = require("../../../utils/general");
 const { Zetabyte } = require("../../../utils/zfs");
 
-// used for in-memory cache of the version info
-const FREENAS_SYSTEM_VERSION_CACHE_KEY = "freenas:system_version";
-const __REGISTRY_NS__ = "FreeNASHttpApi";
+// Registry namespace for cached objects
+const __REGISTRY_NS__ = "TrueNASWebSocketApi";
 
+/**
+ * TrueNAS SCALE 25.04+ JSON-RPC API Wrapper
+ *
+ * This class provides a clean interface to TrueNAS SCALE 25.04+ API
+ * using WebSocket JSON-RPC 2.0 protocol only.
+ *
+ * All legacy support for FreeNAS and old TrueNAS versions has been removed.
+ *
+ * API Documentation: https://api.truenas.com/v25.04.2/
+ */
 class Api {
   constructor(client, cache, options = {}) {
     this.client = client;
     this.cache = cache;
     this.options = options;
+    this.ctx = options.ctx;
   }
 
   async getHttpClient() {
@@ -18,8 +27,7 @@ class Api {
   }
 
   /**
-   * only here for the helpers
-   * @returns
+   * Get ZFS helper utility (for local operations only)
    */
   async getZetabyte() {
     return this.ctx.registry.get(`${__REGISTRY_NS__}:zb`, () => {
@@ -27,7 +35,7 @@ class Api {
         executor: {
           spawn: function () {
             throw new Error(
-              "cannot use the zb implementation to execute zfs commands, must use the http api"
+              "Cannot use ZFS executor directly - must use WebSocket API"
             );
           },
         },
@@ -35,781 +43,425 @@ class Api {
     });
   }
 
-  async findResourceByProperties(endpoint, match) {
-    if (!match) {
-      return;
-    }
-
-    if (typeof match === "object" && Object.keys(match).length < 1) {
-      return;
-    }
-
-    const httpClient = await this.getHttpClient();
-    let target;
-    let page = 0;
-    let lastReponse;
-
-    // loop and find target
-    let queryParams = {};
-    queryParams.limit = 100;
-    queryParams.offset = 0;
-
-    while (!target) {
-      //Content-Range: items 0-2/3 (full set)
-      //Content-Range: items 0--1/3 (invalid offset)
-      if (queryParams.hasOwnProperty("offset")) {
-        queryParams.offset = queryParams.limit * page;
-      }
-
-      // crude stoppage attempt
-      let response = await httpClient.get(endpoint, queryParams);
-      if (lastReponse) {
-        if (JSON.stringify(lastReponse) == JSON.stringify(response)) {
-          break;
-        }
-      }
-      lastReponse = response;
-
-      if (response.statusCode == 200) {
-        if (response.body.length < 1) {
-          break;
-        }
-        response.body.some((i) => {
-          let isMatch = true;
-
-          if (typeof match === "function") {
-            isMatch = match(i);
-          } else {
-            for (let property in match) {
-              if (match[property] != i[property]) {
-                isMatch = false;
-                break;
-              }
-            }
-          }
-
-          if (isMatch) {
-            target = i;
-            return true;
-          }
-
-          return false;
-        });
-      } else {
-        throw new Error(
-          "FreeNAS http error - code: " +
-            response.statusCode +
-            " body: " +
-            JSON.stringify(response.body)
-        );
-      }
-      page++;
-    }
-
-    return target;
-  }
-
-  async getApiVersion() {
-    const systemVersion = await this.getSystemVersion();
-
-    if (systemVersion.v2) {
-      if ((await this.getSystemVersionMajorMinor()) == 11.2) {
-        return 1;
-      }
-      return 2;
-    }
-
-    if (systemVersion.v1) {
-      return 1;
-    }
-
-    return 2;
-  }
-
-  async getIsFreeNAS() {
-    const systemVersion = await this.getSystemVersion();
-    let version;
-
-    if (systemVersion.v2) {
-      version = systemVersion.v2;
-    } else {
-      version = systemVersion.v1.fullversion;
-    }
-
-    if (version.toLowerCase().includes("freenas")) {
-      return true;
-    }
-
-    return false;
-  }
-
-  async getIsTrueNAS() {
-    const systemVersion = await this.getSystemVersion();
-    let version;
-
-    if (systemVersion.v2) {
-      version = systemVersion.v2;
-    } else {
-      version = systemVersion.v1.fullversion;
-    }
-
-    if (version.toLowerCase().includes("truenas")) {
-      return true;
-    }
-
-    return false;
-  }
-
-  async getIsScale() {
-    const systemVersion = await this.getSystemVersion();
-
-    if (systemVersion.v2 && systemVersion.v2.toLowerCase().includes("scale")) {
-      return true;
-    }
-
-    return false;
-  }
-
-  async getSystemVersionMajorMinor() {
-    const systemVersion = await this.getSystemVersion();
-    let parts;
-    let parts_i;
-    let version;
-
-    /*
-    systemVersion.v2 = "FreeNAS-11.2-U5";
-    systemVersion.v2 = "TrueNAS-SCALE-20.11-MASTER-20201127-092915";
-    systemVersion.v1 = {
-      fullversion: "FreeNAS-9.3-STABLE-201503200528",
-      fullversion: "FreeNAS-11.2-U5 (c129415c52)",
-    };
-
-    systemVersion.v2 = null;
-    */
-
-    if (systemVersion.v2) {
-      version = systemVersion.v2;
-    } else {
-      version = systemVersion.v1.fullversion;
-    }
-
-    if (version) {
-      parts = version.split("-");
-      parts_i = [];
-      parts.forEach((value) => {
-        let i = value.replace(/[^\d.]/g, "");
-        if (i.length > 0) {
-          parts_i.push(i);
-        }
-      });
-
-      // join and resplit to deal with single elements which contain a decimal
-      parts_i = parts_i.join(".").split(".");
-      parts_i.splice(2);
-      return parts_i.join(".");
-    }
-  }
-
-  async getSystemVersionMajor() {
-    const majorMinor = await this.getSystemVersionMajorMinor();
-    return majorMinor.split(".")[0];
-  }
-
-  async setVersionInfoCache(versionInfo) {
-    await this.cache.set(FREENAS_SYSTEM_VERSION_CACHE_KEY, versionInfo, {
-      ttl: 60 * 1000,
-    });
-  }
-
-  async getSystemVersion() {
-    let cacheData = await this.cache.get(FREENAS_SYSTEM_VERSION_CACHE_KEY);
-
-    if (cacheData) {
-      return cacheData;
-    }
-
-    const httpClient = await this.getHttpClient(false);
-    const endpoint = "/system/version/";
-    let response;
-    const startApiVersion = httpClient.getApiVersion();
-    const versionInfo = {};
-    const versionErrors = {};
-    const versionResponses = {};
-
-    httpClient.setApiVersion(2);
-    /**
-     * FreeNAS-11.2-U5
-     * TrueNAS-12.0-RELEASE
-     * TrueNAS-SCALE-20.11-MASTER-20201127-092915
-     */
-    try {
-      response = await httpClient.get(endpoint, null, { timeout: 5 * 1000 });
-      versionResponses.v2 = response;
-      if (response.statusCode == 200) {
-        versionInfo.v2 = response.body;
-
-        // return immediately to save on resources and silly requests
-        await this.setVersionInfoCache(versionInfo);
-
-        // reset apiVersion
-        httpClient.setApiVersion(startApiVersion);
-
-        return versionInfo;
-      }
-    } catch (e) {
-      // if more info is needed use e.stack
-      versionErrors.v2 = e.toString();
-    }
-
-    httpClient.setApiVersion(1);
-    /**
-     * {"fullversion": "FreeNAS-9.3-STABLE-201503200528", "name": "FreeNAS", "version": "9.3"}
-     * {"fullversion": "FreeNAS-11.2-U5 (c129415c52)", "name": "FreeNAS", "version": ""}
-     */
-    try {
-      response = await httpClient.get(endpoint, null, { timeout: 5 * 1000 });
-      versionResponses.v1 = response;
-      if (response.statusCode == 200 && IsJsonString(response.body)) {
-        versionInfo.v1 = response.body;
-        await this.setVersionInfoCache(versionInfo);
-
-        // reset apiVersion
-        httpClient.setApiVersion(startApiVersion);
-
-        return versionInfo;
-      }
-    } catch (e) {
-      // if more info is needed use e.stack
-      versionErrors.v1 = e.toString();
-    }
-
-    // throw error if cannot get v1 or v2 data
-    // likely bad creds/url
-    throw new Error(
-      `FreeNAS error getting system version info: ${stringify({
-        errors: versionErrors,
-        responses: versionResponses,
-      })}`
-    );
-  }
-
-  getIsUserProperty(property) {
-    if (property.includes(":")) {
-      return true;
-    }
-    return false;
-  }
-
-  getUserProperties(properties) {
-    let user_properties = {};
-    for (const property in properties) {
-      if (this.getIsUserProperty(property)) {
-        user_properties[property] = properties[property];
-      }
-    }
-
-    return user_properties;
-  }
-
-  getSystemProperties(properties) {
-    let system_properties = {};
-    for (const property in properties) {
-      if (!this.getIsUserProperty(property)) {
-        system_properties[property] = properties[property];
-      }
-    }
-
-    return system_properties;
-  }
-
-  getPropertiesKeyValueArray(properties) {
-    let arr = [];
-    for (const property in properties) {
-      arr.push({ key: property, value: properties[property] });
-    }
-
-    return arr;
-  }
-
-  normalizeProperties(dataset, properties) {
-    let res = {};
-    for (const property of properties) {
-      let p;
-      if (dataset.hasOwnProperty(property)) {
-        p = dataset[property];
-      } else if (
-        dataset.properties &&
-        dataset.properties.hasOwnProperty(property)
-      ) {
-        p = dataset.properties[property];
-      } else if (
-        dataset.user_properties &&
-        dataset.user_properties.hasOwnProperty(property)
-      ) {
-        p = dataset.user_properties[property];
-      } else {
-        p = {
-          value: "-",
-          rawvalue: "-",
-          source: "-",
-        };
-      }
-
-      if (typeof p === "object" && p !== null) {
-        // nothing, leave as is
-      } else {
-        p = {
-          value: p,
-          rawvalue: p,
-          source: "-",
-        };
-      }
-
-      res[property] = p;
-    }
-
-    return res;
-  }
-
-  async DatasetCreate(datasetName, data) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
-
-    data.name = datasetName;
-
-    endpoint = "/pool/dataset";
-    response = await httpClient.post(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("already exists")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+  /**
+   * Call a JSON-RPC method on the TrueNAS API
+   */
+  async call(method, params = []) {
+    const client = await this.getHttpClient();
+    return await client.call(method, params);
   }
 
   /**
-   *
-   * @param {*} datasetName
-   * @param {*} data
-   * @returns
+   * Query resources with optional filters
+   * @param {string} method - The query method (e.g., "pool.dataset.query")
+   * @param {array} filters - Query filters
+   * @param {object} options - Query options (limit, offset, etc.)
    */
-  async DatasetDelete(datasetName, data) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
-
-    endpoint = `/pool/dataset/id/${encodeURIComponent(datasetName)}`;
-    response = await httpClient.delete(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("does not exist")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+  async query(method, filters = [], options = {}) {
+    return await this.call(method, [filters, options]);
   }
 
-  async DatasetSet(datasetName, properties) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
+  /**
+   * Find a single resource by properties
+   * @param {string} method - The query method
+   * @param {object|function} match - Properties to match or matcher function
+   */
+  async findResourceByProperties(method, match) {
+    if (!match) {
+      return null;
+    }
 
-    endpoint = `/pool/dataset/id/${encodeURIComponent(datasetName)}`;
-    response = await httpClient.put(endpoint, {
+    if (typeof match === "object" && Object.keys(match).length < 1) {
+      return null;
+    }
+
+    const results = await this.query(method);
+
+    if (!Array.isArray(results)) {
+      return null;
+    }
+
+    return results.find((item) => {
+      if (typeof match === "function") {
+        return match(item);
+      }
+
+      for (let property in match) {
+        if (match[property] !== item[property]) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  // ============================================================================
+  // SYSTEM VERSION & INFO
+  // ============================================================================
+
+  /**
+   * Get TrueNAS system version info
+   * This is cached to avoid repeated calls
+   */
+  async getSystemVersion() {
+    const cacheKey = "truenas:system_version";
+    let cached = this.cache.get(cacheKey);
+
+    if (cached) {
+      return cached;
+    }
+
+    const version = await this.call("system.version");
+    this.cache.set(cacheKey, version, 300); // Cache for 5 minutes
+    return version;
+  }
+
+  /**
+   * Get system info (hostname, version, etc.)
+   */
+  async getSystemInfo() {
+    return await this.call("system.info");
+  }
+
+  // ============================================================================
+  // POOL & DATASET OPERATIONS
+  // ============================================================================
+
+  /**
+   * Create a new dataset
+   * @param {string} datasetName - Full dataset name (e.g., "pool/dataset")
+   * @param {object} data - Dataset properties
+   */
+  async DatasetCreate(datasetName, data = {}) {
+    try {
+      const params = {
+        name: datasetName,
+        ...data,
+      };
+
+      await this.call("pool.dataset.create", [params]);
+    } catch (error) {
+      // Ignore "already exists" errors
+      if (error.message && error.message.includes("already exists")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a dataset
+   * @param {string} datasetName - Full dataset name
+   * @param {object} data - Delete options (recursive, force, etc.)
+   */
+  async DatasetDelete(datasetName, data = {}) {
+    try {
+      await this.call("pool.dataset.delete", [datasetName, data]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Update dataset properties
+   * @param {string} datasetName - Full dataset name
+   * @param {object} properties - Properties to update
+   */
+  async DatasetSet(datasetName, properties) {
+    const params = {
       ...this.getSystemProperties(properties),
       user_properties_update: this.getPropertiesKeyValueArray(
         this.getUserProperties(properties)
       ),
-    });
+    };
 
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
-  }
-
-  async DatasetInherit(datasetName, property) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
-    let system_properties = {};
-    let user_properties_update = [];
-
-    const isUserProperty = this.getIsUserProperty(property);
-    if (isUserProperty) {
-      user_properties_update = [{ key: property, remove: true }];
-    } else {
-      system_properties[property] = "INHERIT";
-    }
-
-    endpoint = `/pool/dataset/id/${encodeURIComponent(datasetName)}`;
-    response = await httpClient.put(endpoint, {
-      ...system_properties,
-      user_properties_update,
-    });
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    await this.call("pool.dataset.update", [datasetName, params]);
   }
 
   /**
-   *
-   * zfs get -Hp all tank/k8s/test/PVC-111
-   *
-   * @param {*} datasetName
-   * @param {*} properties
-   * @returns
+   * Inherit a dataset property from parent
+   * @param {string} datasetName - Full dataset name
+   * @param {string} property - Property name to inherit
    */
-  async DatasetGet(datasetName, properties) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
+  async DatasetInherit(datasetName, property) {
+    const isUserProperty = this.getIsUserProperty(property);
+    let params = {};
 
-    endpoint = `/pool/dataset/id/${encodeURIComponent(datasetName)}`;
-    response = await httpClient.get(endpoint);
-
-    if (response.statusCode == 200) {
-      return this.normalizeProperties(response.body, properties);
+    if (isUserProperty) {
+      params.user_properties_update = [{ key: property, remove: true }];
+    } else {
+      params[property] = { source: "INHERIT" };
     }
 
-    if (response.statusCode == 404) {
-      throw new Error("dataset does not exist");
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    await this.call("pool.dataset.update", [datasetName, params]);
   }
 
+  /**
+   * Get dataset properties
+   * @param {string} datasetName - Full dataset name
+   * @param {array} properties - Specific properties to retrieve (optional)
+   */
+  async DatasetGet(datasetName, properties = []) {
+    const filters = [["id", "=", datasetName]];
+    const options = {};
+
+    if (properties && properties.length > 0) {
+      options.select = properties;
+    }
+
+    const results = await this.query("pool.dataset.query", filters, options);
+
+    if (!results || results.length === 0) {
+      throw new Error(`Dataset not found: ${datasetName}`);
+    }
+
+    return results[0];
+  }
+
+  /**
+   * Destroy snapshots matching criteria
+   * @param {string} datasetName - Dataset name
+   * @param {object} data - Snapshot destruction criteria
+   */
   async DatasetDestroySnapshots(datasetName, data = {}) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
-
-    data.name = datasetName;
-
-    endpoint = "/pool/dataset/destroy_snapshots";
-    response = await httpClient.post(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return response.body;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("already exists")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    await this.call("pool.dataset.destroy_snapshots", [datasetName, data]);
   }
 
-  async SnapshotSet(snapshotName, properties) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
+  // ============================================================================
+  // SNAPSHOT OPERATIONS
+  // ============================================================================
 
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
-    response = await httpClient.put(endpoint, {
-      //...this.getSystemProperties(properties),
+  /**
+   * Create a snapshot
+   * @param {string} snapshotName - Full snapshot name (dataset@snapshot)
+   * @param {object} data - Snapshot options
+   */
+  async SnapshotCreate(snapshotName, data = {}) {
+    const parts = snapshotName.split("@");
+    if (parts.length !== 2) {
+      throw new Error(`Invalid snapshot name: ${snapshotName}`);
+    }
+
+    const params = {
+      dataset: parts[0],
+      name: parts[1],
+      ...data,
+    };
+
+    await this.call("zfs.snapshot.create", [params]);
+  }
+
+  /**
+   * Delete a snapshot
+   * @param {string} snapshotName - Full snapshot name (dataset@snapshot)
+   * @param {object} data - Delete options
+   */
+  async SnapshotDelete(snapshotName, data = {}) {
+    try {
+      await this.call("zfs.snapshot.delete", [snapshotName, data]);
+    } catch (error) {
+      // Ignore "does not exist" errors
+      if (error.message && error.message.includes("does not exist")) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Update snapshot properties
+   * @param {string} snapshotName - Full snapshot name
+   * @param {object} properties - Properties to update
+   */
+  async SnapshotSet(snapshotName, properties) {
+    const params = {
+      ...this.getSystemProperties(properties),
       user_properties_update: this.getPropertiesKeyValueArray(
         this.getUserProperties(properties)
       ),
-    });
+    };
 
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    await this.call("zfs.snapshot.update", [snapshotName, params]);
   }
 
   /**
-   *
-   * zfs get -Hp all tank/k8s/test/PVC-111
-   *
-   * @param {*} snapshotName
-   * @param {*} properties
-   * @returns
+   * Get snapshot properties
+   * @param {string} snapshotName - Full snapshot name
+   * @param {array} properties - Specific properties to retrieve (optional)
    */
-  async SnapshotGet(snapshotName, properties) {
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
+  async SnapshotGet(snapshotName, properties = []) {
+    const filters = [["id", "=", snapshotName]];
+    const options = {};
 
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
-    response = await httpClient.get(endpoint);
-
-    if (response.statusCode == 200) {
-      return this.normalizeProperties(response.body, properties);
+    if (properties && properties.length > 0) {
+      options.select = properties;
     }
 
-    if (response.statusCode == 404) {
-      throw new Error("dataset does not exist");
+    const results = await this.query("zfs.snapshot.query", filters, options);
+
+    if (!results || results.length === 0) {
+      throw new Error(`Snapshot not found: ${snapshotName}`);
     }
 
-    throw new Error(JSON.stringify(response.body));
+    return results[0];
   }
 
-  async SnapshotCreate(snapshotName, data = {}) {
-    const httpClient = await this.getHttpClient(false);
-    const zb = await this.getZetabyte();
-
-    let response;
-    let endpoint;
-
-    const dataset = zb.helpers.extractDatasetName(snapshotName);
-    const snapshot = zb.helpers.extractSnapshotName(snapshotName);
-
-    data.dataset = dataset;
-    data.name = snapshot;
-
-    endpoint = "/zfs/snapshot";
-    response = await httpClient.post(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("already exists")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
-  }
-
-  async SnapshotDelete(snapshotName, data = {}) {
-    const httpClient = await this.getHttpClient(false);
-    const zb = await this.getZetabyte();
-
-    let response;
-    let endpoint;
-
-    endpoint = `/zfs/snapshot/id/${encodeURIComponent(snapshotName)}`;
-    response = await httpClient.delete(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    if (response.statusCode == 404) {
-      return;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("not found")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
-  }
-
-  async CloneCreate(snapshotName, datasetName, data = {}) {
-    const httpClient = await this.getHttpClient(false);
-    const zb = await this.getZetabyte();
-
-    let response;
-    let endpoint;
-
-    data.snapshot = snapshotName;
-    data.dataset_dst = datasetName;
-
-    endpoint = "/zfs/snapshot/clone";
-    response = await httpClient.post(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return;
-    }
-
-    if (
-      response.statusCode == 422 &&
-      JSON.stringify(response.body).includes("already exists")
-    ) {
-      return;
-    }
-
-    throw new Error(JSON.stringify(response.body));
-  }
-
-  // get all dataset snapshots
-  // https://github.com/truenas/middleware/pull/6934
-  // then use core.bulk to delete all
+  // ============================================================================
+  // CLONE OPERATIONS
+  // ============================================================================
 
   /**
-   *
-   * /usr/lib/python3/dist-packages/middlewared/plugins/replication.py
-   * readonly enum=["SET", "REQUIRE", "IGNORE"]
-   *
-   * @param {*} data
-   * @returns
+   * Clone a snapshot to create a new dataset
+   * @param {string} snapshotName - Source snapshot name
+   * @param {string} datasetName - Target dataset name
+   * @param {object} data - Clone options
+   */
+  async CloneCreate(snapshotName, datasetName, data = {}) {
+    const params = {
+      snapshot: snapshotName,
+      dataset_dst: datasetName,
+      ...data,
+    };
+
+    await this.call("zfs.snapshot.clone", [params]);
+  }
+
+  // ============================================================================
+  // REPLICATION
+  // ============================================================================
+
+  /**
+   * Run a one-time replication task
+   * @param {object} data - Replication configuration
    */
   async ReplicationRunOnetime(data) {
-    const httpClient = await this.getHttpClient(false);
-
-    let response;
-    let endpoint;
-
-    endpoint = "/replication/run_onetime";
-    response = await httpClient.post(endpoint, data);
-
-    // 200 means the 'job' was accepted only
-    // must continue to check the status of the job to know when it has finished and if it was successful
-    // /core/get_jobs [["id", "=", jobidhere]]
-    if (response.statusCode == 200) {
-      return response.body;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    const jobId = await this.call("replication.run_onetime", [data]);
+    return jobId;
   }
 
+  // ============================================================================
+  // JOB MANAGEMENT
+  // ============================================================================
+
   /**
-   *
-   * @param {*} job_id
-   * @param {*} timeout in seconds
-   * @returns
+   * Wait for a job to complete
+   * @param {number} jobId - Job ID to wait for
+   * @param {number} timeout - Timeout in seconds (0 = no timeout)
+   * @param {number} checkInterval - Interval between checks in milliseconds
    */
-  async CoreWaitForJob(job_id, timeout = 0, check_interval = 3000) {
-    if (!job_id) {
-      throw new Error("invalid job_id");
-    }
+  async CoreWaitForJob(jobId, timeout = 0, checkInterval = 3000) {
+    const startTime = Date.now();
 
-    const startTime = Date.now() / 1000;
-    let currentTime;
+    while (true) {
+      const job = await this.call("core.get_jobs", [[["id", "=", jobId]]]);
 
-    let job;
-
-    // wait for job to finish
-    do {
-      currentTime = Date.now() / 1000;
-      if (timeout > 0 && currentTime > startTime + timeout) {
-        throw new Error("timeout waiting for job to complete");
+      if (!job || job.length === 0) {
+        throw new Error(`Job ${jobId} not found`);
       }
 
-      if (job) {
-        await sleep(check_interval);
+      const jobInfo = job[0];
+
+      // Check job state
+      if (jobInfo.state === "SUCCESS") {
+        return jobInfo;
+      } else if (jobInfo.state === "FAILED") {
+        throw new Error(`Job ${jobId} failed: ${jobInfo.error || "Unknown error"}`);
+      } else if (jobInfo.state === "ABORTED") {
+        throw new Error(`Job ${jobId} was aborted`);
       }
-      job = await this.CoreGetJobs({ id: job_id });
-      job = job[0];
-    } while (!["SUCCESS", "ABORTED", "FAILED"].includes(job.state));
 
-    return job;
-  }
+      // Check timeout
+      if (timeout > 0) {
+        const elapsed = (Date.now() - startTime) / 1000;
+        if (elapsed >= timeout) {
+          throw new Error(`Job ${jobId} timed out after ${timeout} seconds`);
+        }
+      }
 
-  async CoreGetJobs(data) {
-    const httpClient = await this.getHttpClient(false);
-
-    let response;
-    let endpoint;
-
-    endpoint = "/core/get_jobs";
-    response = await httpClient.get(endpoint, data);
-
-    // 200 means the 'job' was accepted only
-    // must continue to check the status of the job to know when it has finished and if it was successful
-    // /core/get_jobs [["id", "=", jobidhere]]
-    // state = SUCCESS/ABORTED/FAILED means finality has been reached
-    // state = RUNNING
-    if (response.statusCode == 200) {
-      return response.body;
+      // Wait before checking again
+      await sleep(checkInterval);
     }
-
-    throw new Error(JSON.stringify(response.body));
   }
 
   /**
-   *
-   * @param {*} data
+   * Get jobs matching filters
+   * @param {array} filters - Job filters
+   */
+  async CoreGetJobs(filters = []) {
+    return await this.call("core.get_jobs", [filters]);
+  }
+
+  // ============================================================================
+  // FILESYSTEM PERMISSIONS
+  // ============================================================================
+
+  /**
+   * Set filesystem permissions
+   * @param {object} data - Permission data (path, mode, uid, gid, options)
    */
   async FilesystemSetperm(data) {
-    /*
-      {
-        "path": "string",
-        "mode": "string",
-        "uid": 0,
-        "gid": 0,
-        "options": {
-          "stripacl": false,
-          "recursive": false,
-          "traverse": false
-        }
-      }
-    */
-
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
-
-    endpoint = `/filesystem/setperm`;
-    response = await httpClient.post(endpoint, data);
-
-    if (response.statusCode == 200) {
-      return response.body;
-    }
-
-    throw new Error(JSON.stringify(response.body));
+    const jobId = await this.call("filesystem.setperm", [data]);
+    return jobId;
   }
 
   /**
-   *
-   * @param {*} data
+   * Change filesystem ownership
+   * @param {object} data - Ownership data (path, uid, gid, options)
    */
   async FilesystemChown(data) {
-    /*
-        {
-          "path": "string",
-          "uid": 0,
-          "gid": 0,
-          "options": {
-            "recursive": false,
-            "traverse": false
-          }
-        }
-      */
+    await this.call("filesystem.chown", [data]);
+  }
 
-    const httpClient = await this.getHttpClient(false);
-    let response;
-    let endpoint;
+  // ============================================================================
+  // PROPERTY HELPERS
+  // ============================================================================
 
-    endpoint = `/filesystem/chown`;
-    response = await httpClient.post(endpoint, data);
+  /**
+   * Check if a property is a user property
+   */
+  getIsUserProperty(property) {
+    return property.includes(":");
+  }
 
-    if (response.statusCode == 200) {
-      return response.body;
+  /**
+   * Split properties into system and user properties
+   */
+  getSystemProperties(properties) {
+    const systemProps = {};
+    for (const [key, value] of Object.entries(properties)) {
+      if (!this.getIsUserProperty(key)) {
+        systemProps[key] = value;
+      }
     }
-
-    throw new Error(JSON.stringify(response.body));
+    return systemProps;
   }
-}
 
-function IsJsonString(str) {
-  try {
-    JSON.parse(str);
-  } catch (e) {
-    return false;
+  /**
+   * Get only user properties
+   */
+  getUserProperties(properties) {
+    const userProps = {};
+    for (const [key, value] of Object.entries(properties)) {
+      if (this.getIsUserProperty(key)) {
+        userProps[key] = value;
+      }
+    }
+    return userProps;
   }
-  return true;
+
+  /**
+   * Convert properties object to key-value array format
+   */
+  getPropertiesKeyValueArray(properties) {
+    return Object.entries(properties).map(([key, value]) => ({
+      key,
+      value: String(value),
+    }));
+  }
 }
 
 module.exports.Api = Api;
