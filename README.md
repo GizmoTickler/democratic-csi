@@ -7,41 +7,28 @@
 `democratic-csi` implements the `csi` (container storage interface) spec
 providing storage for various container orchestration systems (ie: Kubernetes).
 
-The current focus is providing storage via iscsi/nfs from zfs-based storage
-systems, predominantly `FreeNAS / TrueNAS` and `ZoL` on `Ubuntu`.
+This version focuses exclusively on providing storage via iSCSI/NFS/NVMe-oF from
+**TrueNAS SCALE 25.04+** using the modern WebSocket JSON-RPC 2.0 API.
 
-The current drivers implement the depth and breadth of the `csi` spec, so you
+The drivers implement the depth and breadth of the `csi` spec, so you
 have access to resizing, snapshots, clones, etc functionality.
 
 `democratic-csi` is 2 things:
 
-- several implementations of `csi` drivers
-  - `freenas-nfs` (manages zfs datasets to share over nfs)
-  - `freenas-iscsi` (manages zfs zvols to share over iscsi)
-  - `freenas-smb` (manages zfs datasets to share over smb)
-  - `freenas-api-nfs` experimental use with SCALE only (manages zfs datasets to share over nfs)
-  - `freenas-api-iscsi` experimental use with SCALE only (manages zfs zvols to share over iscsi)
-  - `freenas-api-smb` experimental use with SCALE only (manages zfs datasets to share over smb)
-  - `zfs-generic-nfs` (works with any ZoL installation...ie: Ubuntu)
-  - `zfs-generic-iscsi` (works with any ZoL installation...ie: Ubuntu)
-  - `zfs-generic-smb` (works with any ZoL installation...ie: Ubuntu)
-  - `zfs-generic-nvmeof` (works with any ZoL installation...ie: Ubuntu)
-  - `zfs-local-ephemeral-inline` (provisions node-local zfs datasets)
-  - `zfs-local-dataset` (provision node-local volume as dataset)
-  - `zfs-local-zvol` (provision node-local volume as zvol)
-  - `synology-iscsi` experimental (manages volumes to share over iscsi)
-  - `objectivefs` (manages objectivefs volumes)
-  - `lustre-client` (crudely provisions storage using a shared lustre
-    share/directory for all volumes)
-  - `nfs-client` (crudely provisions storage using a shared nfs share/directory
-    for all volumes)
-  - `smb-client` (crudely provisions storage using a shared smb share/directory
-    for all volumes)
-  - `local-hostpath` (crudely provisions node-local directories)
-  - `node-manual` (allows connecting to manually created smb, nfs, lustre,
-    oneclient, nvmeof, and iscsi volumes, see sample PVs in the `examples`
-    directory)
+- TrueNAS SCALE 25.04+ CSI driver implementations
+  - `truenas-nfs` (manages ZFS datasets to share over NFS)
+  - `truenas-iscsi` (manages ZFS zvols to share over iSCSI)
+  - `truenas-nvmeof` (manages ZFS zvols to share over NVMe-oF)
 - framework for developing `csi` drivers
+
+## Key Features
+
+- **WebSocket JSON-RPC 2.0 API**: No SSH required - all operations via WebSocket
+- **Modern TrueNAS SCALE 25.04+**: Uses the latest versioned API (`/api/current`)
+- **Three Storage Protocols**: NFS, iSCSI, and NVMe-oF support
+- **Full CSI Spec**: Volume resizing, snapshots, clones, and more
+- **Persistent Connection**: Auto-reconnecting WebSocket with authentication
+- **API Key Auth**: Secure authentication via TrueNAS API keys
 
 If you have any interest in providing a `csi` driver, simply open an issue to
 discuss. The project provides an extensive framework to build from making it
@@ -326,240 +313,86 @@ Set-MSDSMGlobalLoadBalancePolicy -Policy RR
 
 ## Server Prep
 
-Server preparation depends slightly on which `driver` you are using.
+### TrueNAS SCALE 25.04+ (truenas-nfs, truenas-iscsi, truenas-nvmeof)
 
-### FreeNAS (freenas-nfs, freenas-iscsi, freenas-smb, freenas-api-nfs, freenas-api-iscsi, freenas-api-smb)
+**Required**: TrueNAS SCALE 25.04 or later
 
-The recommended version of FreeNAS is 12.0-U2+, however the driver should work
-with much older versions as well.
+These drivers use the WebSocket JSON-RPC 2.0 API exclusively - **no SSH required**.
+All operations are performed via a persistent WebSocket connection to the
+TrueNAS API endpoint (`wss://host/api/current`).
 
-The various `freenas-api-*` drivers are currently EXPERIMENTAL and can only be
-used with SCALE 21.08+. Fundamentally these drivers remove the need for `ssh`
-connections and do all operations entirely with the TrueNAS api. With that in
-mind, any ssh/shell/etc requirements below can be safely ignored. The minimum
-volume size through the api is `1G` so beware that requested volumes with a
-size small will be increased to `1G`. Also note the following known issues:
+#### TrueNAS Configuration
 
-- https://jira.ixsystems.com/browse/NAS-111870
-- https://github.com/democratic-csi/democratic-csi/issues/112
-- https://github.com/democratic-csi/democratic-csi/issues/101
+1. **Enable API Access**
+   - Navigate to **Settings → API Keys**
+   - Click **Add** to create a new API key
+   - Copy the API key (format: `1-xxxxxxxxxxxxxxxxxxxxx`)
+   - Store securely - this is used for authentication
 
-Ensure the following services are configurged and running:
+2. **Configure Storage Pools**
+   - Ensure you have a ZFS pool created (e.g., `tank`)
+   - Create parent datasets for volumes and snapshots:
+     ```bash
+     # Example: Create parent datasets
+     zfs create tank/k8s
+     zfs create tank/k8s/volumes
+     zfs create tank/k8s/snapshots
+     ```
+   - **Important**: Volume and snapshot datasets should be siblings, not nested
 
-- ssh (if you use a password for authentication make sure it is allowed)
-  - https://www.truenas.com/community/threads/ssh-access-ssh-rsa-not-in-pubkeyacceptedalgorithms.101715/
-  - `PubkeyAcceptedAlgorithms +ssh-rsa`
-- ensure `zsh`, `bash`, or `sh` is set as the root shell, `csh` gives false errors due to quoting
-- nfs
-- iscsi
+3. **Configure Services**
+   Ensure the appropriate services are enabled and running:
 
-  - (fixed in 12.0-U2+) when using the FreeNAS API concurrently the
-    `/etc/ctl.conf` file on the server can become invalid, some sample scripts
-    are provided in the `contrib` directory to clean things up ie: copy the
-    script to the server and directly and run - `./ctld-config-watchdog-db.sh | logger -t ctld-config-watchdog-db.sh &`
-    please read the scripts and set the variables as appropriate for your server.
-  - ensure you have pre-emptively created portals, initatior groups, auths
-    - make note of the respective IDs (the true ID may not reflect what is
-      visible in the UI)
-    - IDs can be visible by clicking the the `Edit` link and finding the ID in the
-      browser address bar
-    - Optionally you may use the following to retrieve appropiate IDs:
-      - `curl --header "Accept: application/json" --user root:<password> 'http(s)://<ip>/api/v2.0/iscsi/portal'`
-      - `curl --header "Accept: application/json" --user root:<password> 'http(s)://<ip>/api/v2.0/iscsi/initiator'`
-      - `curl --header "Accept: application/json" --user root:<password> 'http(s)://<ip>/api/v2.0/iscsi/auth'`
-  - The maximum number of volumes is limited to 255 by default on FreeBSD (physical devices such as disks and CD-ROM drives count against this value).
-    Be sure to properly adjust both [tunables](https://www.freebsd.org/cgi/man.cgi?query=ctl&sektion=4#end) `kern.cam.ctl.max_ports` and `kern.cam.ctl.max_luns` to avoid running out of resources when dynamically provisioning iSCSI volumes on FreeNAS or TrueNAS Core.
+   **For NFS (`truenas-nfs`)**:
+   - Navigate to **Sharing → NFS**
+   - Ensure NFS service is enabled (will be started automatically when shares are created)
+   - No pre-configuration needed - shares are created dynamically by the CSI driver
 
-- smb
+   **For iSCSI (`truenas-iscsi`)**:
+   - Navigate to **Sharing → iSCSI**
+   - Create Portal (default port 3260)
+   - Create Initiator Group (allow appropriate initiators or leave empty for all)
+   - Optionally configure CHAP authentication
+   - Note the Portal Group ID and Initiator Group ID for configuration
+   - Use TrueNAS UI or API to get IDs:
+     ```bash
+     # Get Portal IDs
+     curl -H "Authorization: Bearer YOUR_API_KEY" \
+       https://truenas.example.com/api/v2.0/iscsi/portal
 
-If you would prefer you can configure `democratic-csi` to use a
-non-`root` user when connecting to the FreeNAS server:
+     # Get Initiator Group IDs
+     curl -H "Authorization: Bearer YOUR_API_KEY" \
+       https://truenas.example.com/api/v2.0/iscsi/initiator
+     ```
+   - Targets and extents are created dynamically by the CSI driver
 
-- Create a non-`root` user (e.g., `csi`)
+   **For NVMe-oF (`truenas-nvmeof`)**:
+   - Navigate to **Sharing → NVMe-oF**
+   - Ensure NVMe-oF service is configured
+   - Subsystems and namespaces are created dynamically by the CSI driver
+   - Configure transport (TCP recommended, port 4420)
 
-- Ensure that user has passwordless `sudo` privileges:
+4. **Network Configuration**
+   - Ensure the TrueNAS system is reachable from your Kubernetes cluster
+   - Open required ports in firewall:
+     - **WebSocket API**: 443 (HTTPS) or 80 (HTTP)
+     - **NFS**: 2049, 111, 20048
+     - **iSCSI**: 3260 (default)
+     - **NVMe-oF**: 4420 (TCP default)
 
-  ```
-  csi ALL=(ALL) NOPASSWD:ALL
+5. **TLS/SSL Configuration**
+   - For production use, configure a valid TLS certificate
+   - For testing, you can use self-signed certificates with `allowInsecure: true`
+   - Navigate to **Settings → Certificates** to manage certificates
 
-  # if on CORE 12.0-u3+ you should be able to do the following
-  # which will ensure it does not get reset during reboots etc
-  # at the command prompt
-  cli
+#### Example Configuration
 
-  # after you enter the truenas cli and are at that prompt
-  account user query select=id,username,uid,sudo_nopasswd
+See the `examples/` directory for complete configuration examples:
+- `examples/truenas-nfs.yaml` - NFS driver configuration
+- `examples/truenas-iscsi.yaml` - iSCSI driver configuration
+- `examples/truenas-nvmeof.yaml` - NVMe-oF driver configuration
 
-  # find the `id` of the user you want to update (note, this is distinct from the `uid`)
-  account user update id=<id> sudo=true
-  account user update id=<id> sudo_nopasswd=true
-  # optional if you want to disable password
-  #account user update id=<id> password_disabled=true
-
-  # exit cli by hitting ctrl-d
-
-  # confirm sudoers file is appropriate
-  cat /usr/local/etc/sudoers
-  ```
-
-  (note this can get reset by FreeNAS if you alter the user via the
-  GUI later)
-
-- Instruct `democratic-csi` to use `sudo` by adding the following to
-  your driver configuration:
-
-  ```
-  zfs:
-    cli:
-      sudoEnabled: true
-  ```
-
-Starting with TrueNAS CORE 12 it is also possible to use an `apiKey` instead of
-the `root` password for the http connection.
-
-Issues to review:
-
-- https://jira.ixsystems.com/browse/NAS-108519
-- https://jira.ixsystems.com/browse/NAS-108520
-- https://jira.ixsystems.com/browse/NAS-108521
-- https://jira.ixsystems.com/browse/NAS-108522
-- https://jira.ixsystems.com/browse/NAS-107219
-
-### ZoL (zfs-generic-nfs, zfs-generic-iscsi, zfs-generic-smb, zfs-generic-nvmeof)
-
-Ensure ssh and zfs is installed on the nfs/iscsi server and that you have installed
-`targetcli`.
-
-The driver executes many commands over an ssh connection. You may consider
-disabling all the `motd` details for the ssh user as it can spike the cpu
-unecessarily:
-
-- https://askubuntu.com/questions/318592/how-can-i-remove-the-landscape-canonical-com-greeting-from-motd
-- https://linuxconfig.org/disable-dynamic-motd-and-news-on-ubuntu-20-04-focal-fossa-linux
-- https://github.com/democratic-csi/democratic-csi/issues/151 (some notes on
-  using delegated zfs permissions)
-
-```bash
-####### nfs
-yum install -y nfs-utils
-systemctl enable --now nfs-server.service
-
-apt-get install -y nfs-kernel-server
-systemctl enable --now nfs-kernel-server.service
-
-####### iscsi
-yum install targetcli -y
-apt-get -y install targetcli-fb
-
-####### smb
-apt-get install -y samba smbclient
-
-# create posix user
-groupadd -g 1001 smbroot
-useradd -u 1001 -g 1001 -M -N -s /sbin/nologin smbroot
-passwd smbroot (optional)
-
-# create smb user and set password
-# The pw you will later also need in the client mount options
-smbpasswd -L -a smbroot
-
-####### nvmeof
-# ensure nvmeof target modules are loaded at startup
-cat <<EOF > /etc/modules-load.d/nvmet.conf
-nvmet
-nvmet-tcp
-nvmet-fc
-nvmet-rdma
-EOF
-
-# load the modules immediately
-modprobe nvmet
-modprobe nvmet-tcp
-modprobe nvmet-fc
-modprobe nvmet-rdma
-
-# install nvmetcli and systemd services
-git clone git://git.infradead.org/users/hch/nvmetcli.git
-cd nvmetcli
-
-## install globally
-python3 setup.py install --prefix=/usr
-pip install configshell_fb
-
-## install to root home dir
-python3 setup.py install --user
-pip install configshell_fb --user
-
-# prevent log files from filling up disk
-ln -sf /dev/null ~/.nvmetcli/log.txt
-ln -sf /dev/null ~/.nvmetcli/history.txt
-
-# install systemd unit and enable/start
-## optionally to ensure the config file is loaded before we start
-## reading/writing to it add an ExecStartPost= to the unit file
-##
-## ExecStartPost=/usr/bin/touch /var/run/nvmet-config-loaded
-##
-## in your dirver config set nvmeof.shareStrategyNvmetCli.configIsImportedFilePath=/var/run/nvmet-config-loaded
-## which will prevent the driver from making any changes until the configured
-## file is present
-vi nvmet.service
-
-cp nvmet.service /etc/systemd/system/
-mkdir -p /etc/nvmet
-systemctl daemon-reload
-systemctl enable --now nvmet.service
-systemctl status nvmet.service
-
-# create the port(s) configuration manually
-echo "
-cd /
-ls
-" | nvmetcli
-
-# do this multiple times altering as appropriate if you have/want multipath
-# change the port to 2, 3.. each additional path
-# the below example creates a tcp port listening on all IPs on port 4420
-echo "
-cd /ports
-create 1
-cd 1
-set addr adrfam=ipv4 trtype=tcp traddr=0.0.0.0 trsvcid=4420
-
-saveconfig /etc/nvmet/config.json
-" | nvmetcli
-
-# if running TrueNAS SCALE you can skip the above and simply copy
-# contrib/scale-nvmet-start.sh to your machine and add it as a startup script
-# to launch POSTINIT type COMMAND
-# and then create the port(s) as mentioned above
-```
-
-### Synology (synology-iscsi)
-
-Ensure iscsi manager has been installed and is generally setup/configured. DSM 6.3+ is supported.
-
-### objectivefs (objectivefs)
-
-ObjectiveFS requires the use of an _Admin Key_ to properly automate the
-lifecycle of filesystems. Each deployment of the driver will point to a single
-`pool` (bucket) and create individual `filesystems` within that bucket
-on-demand.
-
-Ensure the config value used for `pool` is an existing bucket. Be sure the
-bucket is _NOT_ being used in fs mode (ie: the whole bucket is a single fs).
-
-The `democratic-csi` `node` container will host the fuse mount process so
-be careful to only upgrade when all relevant workloads have been drained from
-the respective node. Also beware that any cpu/memory limits placed on the
-container by the orchestration system will impact any ability to use the
-caching, etc features of objectivefs.
-
-- https://objectivefs.com/howto/csi-driver-objectivefs
-- https://objectivefs.com/howto/csi-driver-objectivefs-kubernetes-managed
-- https://objectivefs.com/howto/objectivefs-admin-key-setup
-- https://objectivefs.com/features#filesystem-pool
-- https://objectivefs.com/howto/how-to-create-a-filesystem-with-an-existing-empty-bucket
+Each example includes detailed comments explaining all configuration options.
 
 ## Helm Installation
 
