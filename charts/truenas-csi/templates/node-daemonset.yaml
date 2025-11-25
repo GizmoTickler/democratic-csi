@@ -1,0 +1,179 @@
+{{- if .Values.node.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "truenas-csi.fullname" . }}-node
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "truenas-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      {{- include "truenas-csi.nodeSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "truenas-csi.nodeSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "truenas-csi.nodeServiceAccountName" . }}
+      priorityClassName: system-node-critical
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # CSI Driver
+        - name: truenas-csi
+          image: "{{ .Values.image.repository }}:{{ include "truenas-csi.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--endpoint=unix://{{ include "truenas-csi.socketPath" . }}"
+            - "--node-id=$(NODE_ID)"
+            - "--driver-name={{ .Values.csiDriverName }}"
+            - "--controller=false"
+            - "--node=true"
+            - "--v={{ .Values.logging.verbosity }}"
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: TRUENAS_HOST
+              value: {{ .Values.truenas.host | quote }}
+            - name: TRUENAS_PORT
+              value: {{ .Values.truenas.port | quote }}
+            - name: TRUENAS_SECURE
+              value: {{ .Values.truenas.secure | quote }}
+            - name: TRUENAS_SKIP_TLS_VERIFY
+              value: {{ .Values.truenas.skipTLSVerify | quote }}
+            {{- if or .Values.truenas.apiKey .Values.truenas.existingSecret }}
+            - name: TRUENAS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "truenas-csi.secretName" . }}
+                  key: api-key
+                  optional: true
+            {{- end }}
+            {{- if or .Values.truenas.username .Values.truenas.existingSecret }}
+            - name: TRUENAS_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "truenas-csi.secretName" . }}
+                  key: username
+                  optional: true
+            - name: TRUENAS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "truenas-csi.secretName" . }}
+                  key: password
+                  optional: true
+            {{- end }}
+            {{- with .Values.node.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ include "truenas-csi.socketDir" . }}
+            - name: kubelet-dir
+              mountPath: {{ include "truenas-csi.kubeletDir" . }}
+              mountPropagation: Bidirectional
+            - name: host-dev
+              mountPath: /dev
+            - name: host-sys
+              mountPath: /sys
+            - name: host-run-udev
+              mountPath: /run/udev
+            - name: iscsi-dir
+              mountPath: /etc/iscsi
+            - name: iscsi-lib
+              mountPath: /var/lib/iscsi
+            {{- with .Values.node.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+
+        # Node Driver Registrar
+        - name: csi-node-driver-registrar
+          image: {{ .Values.sidecars.nodeDriverRegistrar.image }}
+          args:
+            - "--csi-address={{ include "truenas-csi.socketPath" . }}"
+            - "--kubelet-registration-path={{ include "truenas-csi.kubeletDir" . }}/plugins/{{ .Values.csiDriverName }}/csi.sock"
+            - "--v={{ .Values.logging.verbosity }}"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ include "truenas-csi.socketDir" . }}
+            - name: registration-dir
+              mountPath: /registration
+          resources:
+            {{- toYaml .Values.sidecars.nodeDriverRegistrar.resources | nindent 12 }}
+
+        # Liveness Probe
+        - name: liveness-probe
+          image: {{ .Values.sidecars.livenessProbe.image }}
+          args:
+            - "--csi-address={{ include "truenas-csi.socketPath" . }}"
+            - "--probe-timeout=3s"
+            - "--health-port=9808"
+            - "--v={{ .Values.logging.verbosity }}"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ include "truenas-csi.socketDir" . }}
+          resources:
+            {{- toYaml .Values.sidecars.livenessProbe.resources | nindent 12 }}
+
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: {{ include "truenas-csi.kubeletDir" . }}/plugins/{{ .Values.csiDriverName }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ include "truenas-csi.kubeletDir" . }}/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: {{ include "truenas-csi.kubeletDir" . }}
+            type: Directory
+        - name: host-dev
+          hostPath:
+            path: /dev
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: host-run-udev
+          hostPath:
+            path: /run/udev
+            type: Directory
+        - name: iscsi-dir
+          hostPath:
+            path: /etc/iscsi
+            type: DirectoryOrCreate
+        - name: iscsi-lib
+          hostPath:
+            path: /var/lib/iscsi
+            type: DirectoryOrCreate
+        {{- with .Values.node.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}

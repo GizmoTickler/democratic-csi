@@ -1,138 +1,67 @@
-FROM debian:12-slim AS build
-#FROM --platform=$BUILDPLATFORM debian:10-slim AS build
+# Build stage
+FROM golang:1.22-bookworm AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /build
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
+# Copy go mod files first for better caching
+COPY go.mod go.sum* ./
+RUN go mod download || true
 
-RUN echo "I am running build on $BUILDPLATFORM, building for $TARGETPLATFORM"
+# Copy source code
+COPY . .
 
-RUN apt-get update && apt-get install -y locales && rm -rf /var/lib/apt/lists/* \
-  && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
-
-ENV LANG=en_US.utf8
-ENV NODE_VERSION=v20.11.1
-ENV NODE_ENV=production
-
-# install build deps
-RUN apt-get update && apt-get install -y python3 make cmake gcc g++
-
-# install node
-RUN apt-get update && apt-get install -y wget xz-utils
-ADD docker/node-installer.sh /usr/local/sbin
-RUN chmod +x /usr/local/sbin/node-installer.sh && node-installer.sh
-ENV PATH=/usr/local/lib/nodejs/bin:$PATH
-
-# Run as a non-root user
-RUN useradd --create-home csi \
-  && mkdir /home/csi/app \
-  && chown -R csi: /home/csi
-WORKDIR /home/csi/app
-USER csi
-
-COPY --chown=csi:csi package*.json ./
-RUN npm install --only=production --grpc_node_binary_host_mirror=https://grpc-uds-binaries.s3-us-west-2.amazonaws.com/debian-buster
-COPY --chown=csi:csi . .
-RUN rm -rf docker
-
+# Build the binary
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -o truenas-csi ./cmd/truenas-csi
 
 ######################
-# actual image
+# Runtime image
 ######################
 FROM debian:12-slim
 
-LABEL org.opencontainers.image.source https://github.com/GizmoTickler/truenas-scale-csi
-LABEL org.opencontainers.image.url https://github.com/GizmoTickler/truenas-scale-csi
-LABEL org.opencontainers.image.licenses MIT
-LABEL org.opencontainers.image.title "TrueNAS Scale CSI Driver"
-LABEL org.opencontainers.image.description "Kubernetes CSI driver for TrueNAS SCALE"
+LABEL org.opencontainers.image.source="https://github.com/GizmoTickler/truenas-scale-csi"
+LABEL org.opencontainers.image.url="https://github.com/GizmoTickler/truenas-scale-csi"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.title="TrueNAS Scale CSI Driver"
+LABEL org.opencontainers.image.description="Kubernetes CSI driver for TrueNAS SCALE"
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV TRUENAS_CSI_IS_CONTAINER=true
 
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
-ARG OBJECTIVEFS_DOWNLOAD_ID
+# Install runtime dependencies
+# - nfs-common: NFS client for mounting NFS shares
+# - open-iscsi: iSCSI initiator for block storage
+# - nvme-cli: NVMe-oF client for NVMe over fabrics
+# - e2fsprogs, xfsprogs, btrfs-progs: filesystem tools for formatting
+# - util-linux: mount, findmnt, blkid utilities
+# - ca-certificates: for HTTPS connections to TrueNAS API
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    nfs-common \
+    open-iscsi \
+    nvme-cli \
+    e2fsprogs \
+    xfsprogs \
+    btrfs-progs \
+    util-linux \
+    udev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /var/cache/apt/archives/*
 
-RUN echo "I am running on final $BUILDPLATFORM, building for $TARGETPLATFORM"
+# Create non-root user
+RUN useradd --create-home --uid 1000 csi
 
-RUN apt-get update && apt-get install -y locales && rm -rf /var/lib/apt/lists/* \
-  && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+# Copy binary from builder
+COPY --from=builder /build/truenas-csi /usr/local/bin/truenas-csi
 
-ENV LANG=en_US.utf8
-ENV NODE_ENV=production
+# Create directories for CSI socket and config
+RUN mkdir -p /csi /etc/truenas-csi && chown -R csi:csi /csi /etc/truenas-csi
 
-# Workaround for https://github.com/nodejs/node/issues/37219
-RUN test $(uname -m) != armv7l || ( \
-  apt-get update \
-  && apt-get install -y libatomic1 \
-  && rm -rf /var/lib/apt/lists/* \
-  )
-
-# install node
-#ENV PATH=/usr/local/lib/nodejs/bin:$PATH
-#COPY --from=build /usr/local/lib/nodejs /usr/local/lib/nodejs
-COPY --from=build /usr/local/lib/nodejs/bin/node /usr/local/bin/node
-
-# node service requirements
-# netbase is required by rpcbind/rpcinfo to work properly
-# /etc/{services,rpc} are required
-RUN apt-get update && \
-  apt-get install -y wget netbase zip bzip2 socat e2fsprogs exfatprogs xfsprogs btrfs-progs fatresize dosfstools ntfs-3g nfs-common cifs-utils fdisk gdisk cloud-guest-utils sudo rsync procps util-linux nvme-cli fuse3 && \
-  rm -rf /var/lib/apt/lists/*
-
-ARG RCLONE_VERSION=1.66.0
-ADD docker/rclone-installer.sh /usr/local/sbin
-RUN chmod +x /usr/local/sbin/rclone-installer.sh && rclone-installer.sh
-
-ARG RESTIC_VERSION=0.16.4
-ADD docker/restic-installer.sh /usr/local/sbin
-RUN chmod +x /usr/local/sbin/restic-installer.sh && restic-installer.sh
-
-ARG KOPIA_VERSION=0.16.1
-ADD docker/kopia-installer.sh /usr/local/sbin
-RUN chmod +x /usr/local/sbin/kopia-installer.sh && kopia-installer.sh
-
-# controller requirements
-#RUN apt-get update && \
-#        apt-get install -y ansible && \
-#        rm -rf /var/lib/apt/lists/*
-
-# install objectivefs
-ARG OBJECTIVEFS_VERSION=7.2
-ADD docker/objectivefs-installer.sh /usr/local/sbin
-RUN chmod +x /usr/local/sbin/objectivefs-installer.sh && objectivefs-installer.sh
-
-# install wrappers
-ADD docker/iscsiadm /usr/local/sbin
-RUN chmod +x /usr/local/sbin/iscsiadm
-
-ADD docker/multipath /usr/local/sbin
-RUN chmod +x /usr/local/sbin/multipath
-
-## USE_HOST_MOUNT_TOOLS=1
-ADD docker/mount /usr/local/bin/mount
-RUN chmod +x /usr/local/bin/mount
-
-## USE_HOST_MOUNT_TOOLS=1
-ADD docker/umount /usr/local/bin/umount
-RUN chmod +x /usr/local/bin/umount
-
-ADD docker/zfs /usr/local/bin/zfs
-RUN chmod +x /usr/local/bin/zfs
-ADD docker/zpool /usr/local/bin/zpool
-RUN chmod +x /usr/local/bin/zpool
-ADD docker/oneclient /usr/local/bin/oneclient
-RUN chmod +x /usr/local/bin/oneclient
-
-# Run as a non-root user
-RUN useradd --create-home csi \
-  && chown -R csi: /home/csi
-
-COPY --from=build --chown=csi:csi /home/csi/app /home/csi/app
-
-WORKDIR /home/csi/app
+WORKDIR /
 
 EXPOSE 50051
-ENTRYPOINT [ "bin/truenas-csi" ]
+
+ENTRYPOINT ["/usr/local/bin/truenas-csi"]
