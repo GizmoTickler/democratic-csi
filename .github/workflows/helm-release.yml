@@ -44,6 +44,10 @@ jobs:
       - name: Get chart version
         id: chart_version
         run: |
+          # Convert repository owner to lowercase for OCI registry
+          REPO_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo_owner=${REPO_OWNER}" >> $GITHUB_OUTPUT
+
           if [ "${{ github.event_name }}" == "release" ]; then
             # Use release tag version (strip 'v' prefix)
             VERSION="${{ github.event.release.tag_name }}"
@@ -77,6 +81,6 @@ jobs:
       - name: Push chart to OCI registry
         run: |
           helm push .helm-packages/${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz \
-            oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+            oci://${{ env.REGISTRY }}/${{ steps.chart_version.outputs.repo_owner }}/charts
 
-          echo "Chart pushed to: oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/${{ env.CHART_NAME }}:${{ steps.chart_version.outputs.version }}"
+          echo "Chart pushed to: oci://${{ env.REGISTRY }}/${{ steps.chart_version.outputs.repo_owner }}/charts/${{ env.CHART_NAME }}:${{ steps.chart_version.outputs.version }}"
