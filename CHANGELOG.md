@@ -1,3 +1,12 @@
+# v2.2.5
+
+Release 2025-11-25
+
+**Bug Fixes:**
+- Auto-detect iscsiadm binary location (Talos uses `/usr/local/sbin/iscsiadm`)
+  - Searches multiple paths: `/usr/sbin`, `/usr/local/sbin`, `/sbin`, `/usr/bin`
+  - Can still override with `ISCSIADM_HOST_PATH` environment variable
+
 # v2.2.4
 
 Release 2025-11-25

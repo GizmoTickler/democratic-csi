@@ -1,7 +1,20 @@
 #!/bin/bash
 
 : "${ISCSIADM_HOST_STRATEGY:=nsenter}"
-: "${ISCSIADM_HOST_PATH:=/usr/sbin/iscsiadm}"
+
+# Find iscsiadm binary - check multiple possible locations (varies by OS/distro)
+find_iscsiadm() {
+  for path in /usr/sbin/iscsiadm /usr/local/sbin/iscsiadm /sbin/iscsiadm /usr/bin/iscsiadm; do
+    if [[ -x "/host${path}" ]]; then
+      echo "${path}"
+      return
+    fi
+  done
+  # Fallback to default
+  echo "/usr/sbin/iscsiadm"
+}
+
+: "${ISCSIADM_HOST_PATH:=$(find_iscsiadm)}"
 
 echoerr() { printf "%s\n" "$*" >&2; }
 
