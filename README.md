@@ -258,7 +258,7 @@ helm install truenas-nvmeof \
 helm show all oci://ghcr.io/gizmotickler/charts/truenas-csi
 
 # To pull a specific version
-helm pull oci://ghcr.io/gizmotickler/charts/truenas-csi --version 0.1.0
+helm pull oci://ghcr.io/gizmotickler/charts/truenas-csi --version 4.0.0
 ```
 
 Copy and edit the appropriate values file from `examples/`:
