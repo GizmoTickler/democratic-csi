@@ -1,5 +1,6 @@
-# Helm Chart Release Workflow
-# Publishes Helm charts to GitHub Pages at https://gizmotickler.github.io/truenas-scale-csi/
+# Helm Chart Release Workflow (OCI)
+# Publishes Helm charts to GitHub Container Registry as OCI artifacts
+# Usage: helm pull oci://ghcr.io/gizmotickler/charts/truenas-csi --version <version>
 
 name: Helm Chart Release
 
@@ -11,56 +12,71 @@ on:
     paths:
       - 'charts/**'
       - '.github/workflows/helm-release.yml'
-  # Also trigger on version tags to sync chart releases with app releases
   release:
     types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  CHART_NAME: truenas-csi
 
 jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pages: write
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Configure Git
-        run: |
-          git config user.name "$GITHUB_ACTOR"
-          git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
       - name: Install Helm
         uses: azure/setup-helm@v3
         with:
           version: v3.13.0
 
-      - name: Add Helm repositories (if needed for dependencies)
-        run: |
-          helm repo add stable https://charts.helm.sh/stable || true
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update chart appVersion on release
+      - name: Get chart version
+        id: chart_version
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            # Use release tag version (strip 'v' prefix)
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          else
+            # Use version from Chart.yaml for push events
+            VERSION=$(grep '^version:' charts/${{ env.CHART_NAME }}/Chart.yaml | awk '{print $2}')
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Chart version: ${VERSION}"
+
+      - name: Update chart version on release
         if: github.event_name == 'release'
         run: |
-          # Extract version from release tag (remove 'v' prefix if present)
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
+          VERSION="${{ steps.chart_version.outputs.version }}"
 
-          # Update appVersion in Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/truenas-csi/Chart.yaml
+          # Update version and appVersion in Chart.yaml
+          sed -i "s/^version:.*/version: ${VERSION}/" charts/${{ env.CHART_NAME }}/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" charts/${{ env.CHART_NAME }}/Chart.yaml
 
-          # Optionally bump chart version to match app version
-          sed -i "s/^version:.*/version: ${VERSION}/" charts/truenas-csi/Chart.yaml
+          echo "Updated Chart.yaml:"
+          cat charts/${{ env.CHART_NAME }}/Chart.yaml
 
-          echo "Updated chart to version ${VERSION}"
-          cat charts/truenas-csi/Chart.yaml
+      - name: Lint chart
+        run: helm lint charts/${{ env.CHART_NAME }}
 
-      - name: Run chart-releaser
-        uses: helm/chart-releaser-action@v1.6.0
-        with:
-          charts_dir: charts
-          config: .github/cr-config.yaml
-        env:
-          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+      - name: Package chart
+        run: |
+          helm package charts/${{ env.CHART_NAME }} --destination .helm-packages
+
+      - name: Push chart to OCI registry
+        run: |
+          helm push .helm-packages/${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz \
+            oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+          echo "Chart pushed to: oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/${{ env.CHART_NAME }}:${{ steps.chart_version.outputs.version }}"
