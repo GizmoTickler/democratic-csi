@@ -113,6 +113,14 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9808
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
 
         # Node Driver Registrar
         - name: csi-node-driver-registrar

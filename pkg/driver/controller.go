@@ -144,8 +144,35 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	// Check if volume already exists
 	existingDS, err := d.truenasClient.DatasetGet(datasetName)
 	if err == nil && existingDS != nil {
-		// Volume exists - return existing volume context
+		// Volume exists - check and ensure properties are set
 		klog.Infof("Volume %s already exists", volumeID)
+
+		// Ensure properties are set (idempotent)
+		g, _ := errgroup.WithContext(ctx)
+		g.Go(func() error {
+			if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropManagedResource, "true"); err != nil {
+				return fmt.Errorf("failed to set managed resource property: %w", err)
+			}
+			return nil
+		})
+		g.Go(func() error {
+			if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropProvisionSuccess, "true"); err != nil {
+				return fmt.Errorf("failed to set provision success property: %w", err)
+			}
+			return nil
+		})
+		g.Go(func() error {
+			if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropCSIVolumeName, name); err != nil {
+				return fmt.Errorf("failed to set CSI volume name property: %w", err)
+			}
+			return nil
+		})
+		// Wait for all property sets to complete
+		if err := g.Wait(); err != nil {
+			klog.Errorf("Failed to ensure properties for existing volume %s: %v", volumeID, err)
+			return nil, status.Errorf(codes.Internal, "failed to ensure volume properties: %v", err)
+		}
+
 		volumeContext, err := d.getVolumeContext(datasetName)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to get volume context: %v", err)
@@ -186,24 +213,28 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropManagedResource, "true"); err != nil {
-			klog.Warningf("Failed to set managed resource property: %v", err)
+			return fmt.Errorf("failed to set managed resource property: %w", err)
 		}
-		return nil // Non-fatal, always return nil
+		return nil
 	})
 	g.Go(func() error {
 		if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropProvisionSuccess, "true"); err != nil {
-			klog.Warningf("Failed to set provision success property: %v", err)
+			return fmt.Errorf("failed to set provision success property: %w", err)
 		}
 		return nil
 	})
 	g.Go(func() error {
 		if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropCSIVolumeName, name); err != nil {
-			klog.Warningf("Failed to set CSI volume name property: %v", err)
+			return fmt.Errorf("failed to set CSI volume name property: %w", err)
 		}
 		return nil
 	})
 	// Wait for all property sets to complete
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		// If property setting fails, return error so it retries
+		klog.Errorf("Failed to set properties for volume %s: %v", volumeID, err)
+		return nil, status.Errorf(codes.Internal, "failed to set volume properties: %v", err)
+	}
 
 	// Get volume context for response
 	volumeContext, err := d.getVolumeContext(datasetName)
@@ -387,26 +418,30 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 	}
 
 	// Set snapshot properties in parallel
+	// Set snapshot properties in parallel
 	g, _ := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		if err := d.truenasClient.SnapshotSetUserProperty(snap.ID, PropManagedResource, "true"); err != nil {
-			klog.Warningf("Failed to set managed resource property on snapshot: %v", err)
+			return fmt.Errorf("failed to set managed resource property on snapshot: %w", err)
 		}
 		return nil
 	})
 	g.Go(func() error {
 		if err := d.truenasClient.SnapshotSetUserProperty(snap.ID, PropCSISnapshotName, name); err != nil {
-			klog.Warningf("Failed to set CSI snapshot name property: %v", err)
+			return fmt.Errorf("failed to set CSI snapshot name property: %w", err)
 		}
 		return nil
 	})
 	g.Go(func() error {
 		if err := d.truenasClient.SnapshotSetUserProperty(snap.ID, PropCSISnapshotSourceVolumeID, sourceVolumeID); err != nil {
-			klog.Warningf("Failed to set CSI snapshot source volume ID property: %v", err)
+			return fmt.Errorf("failed to set CSI snapshot source volume ID property: %w", err)
 		}
 		return nil
 	})
-	_ = g.Wait()
+	if err := g.Wait(); err != nil {
+		klog.Errorf("Failed to set properties for snapshot %s: %v", snapshotID, err)
+		return nil, status.Errorf(codes.Internal, "failed to set snapshot properties: %v", err)
+	}
 
 	klog.Infof("Snapshot %s created successfully", snapshotID)
 

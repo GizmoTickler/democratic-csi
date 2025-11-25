@@ -1,3 +1,12 @@
+# v2.2.0
+
+Release 2025-11-25
+
+- Refactored codebase for improved testability with `ClientInterface` and `MockClient`
+- Added liveness probes to Controller and Node DaemonSet
+- Cleaned up legacy CI configurations and scripts
+- Added unit tests for controller logic
+
 # v2.1.0
 
 Release 2025-11-24

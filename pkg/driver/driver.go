@@ -44,7 +44,7 @@ type Driver struct {
 	config        *Config
 
 	// TrueNAS API client
-	truenasClient *truenas.Client
+	truenasClient truenas.ClientInterface
 
 	// gRPC server
 	server *grpc.Server
@@ -240,7 +240,7 @@ func (d *Driver) releaseOperationLock(key string) {
 }
 
 // GetTrueNASClient returns the TrueNAS API client.
-func (d *Driver) GetTrueNASClient() *truenas.Client {
+func (d *Driver) GetTrueNASClient() truenas.ClientInterface {
 	return d.truenasClient
 }
 

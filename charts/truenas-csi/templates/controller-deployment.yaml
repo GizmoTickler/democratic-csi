@@ -93,6 +93,14 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9808
+            initialDelaySeconds: 10
+            timeoutSeconds: 3
+            periodSeconds: 10
+            failureThreshold: 5
 
         # CSI Provisioner
         - name: csi-provisioner
@@ -155,6 +163,20 @@ spec:
               mountPath: {{ include "truenas-csi.socketDir" . }}
           resources:
             {{- toYaml .Values.sidecars.snapshotter.resources | nindent 12 }}
+
+        # Liveness Probe
+        - name: liveness-probe
+          image: {{ .Values.sidecars.livenessProbe.image }}
+          args:
+            - "--csi-address={{ include "truenas-csi.socketPath" . }}"
+            - "--probe-timeout=3s"
+            - "--health-port=9808"
+            - "--v={{ .Values.logging.verbosity }}"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ include "truenas-csi.socketDir" . }}
+          resources:
+            {{- toYaml .Values.sidecars.livenessProbe.resources | nindent 12 }}
 
       volumes:
         - name: socket-dir

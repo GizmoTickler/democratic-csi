@@ -445,7 +445,7 @@ func GetISCSIInfoFromDevice(devicePath string) (string, string, error) {
 
 	if iqn == "" {
 		// Fallback: direct search
-		err = filepath.Walk(sessionDir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(sessionDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}

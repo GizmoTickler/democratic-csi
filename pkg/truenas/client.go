@@ -65,15 +65,15 @@ func IsConnectionError(err error) bool {
 
 // ClientConfig holds the configuration for the TrueNAS client.
 type ClientConfig struct {
-	Host           string
-	Port           int
-	Protocol       string
-	APIKey         string
-	AllowInsecure  bool
-	Timeout        time.Duration
-	ConnectTimeout time.Duration
-	MaxRetries     int           // Maximum number of connection retries (default: 3)
-	RetryInterval  time.Duration // Initial retry interval (default: 1s, exponential backoff applied)
+	Host              string
+	Port              int
+	Protocol          string
+	APIKey            string
+	AllowInsecure     bool
+	Timeout           time.Duration
+	ConnectTimeout    time.Duration
+	MaxRetries        int           // Maximum number of connection retries (default: 3)
+	RetryInterval     time.Duration // Initial retry interval (default: 1s, exponential backoff applied)
 	HeartbeatInterval time.Duration // Interval for WebSocket heartbeat (default: 30s)
 }
 
@@ -104,9 +104,9 @@ type Client struct {
 	closed        bool
 
 	// Connection state management (fixes thundering herd)
-	connState     int32 // atomic connectionState
-	connCond      *sync.Cond
-	connMu        sync.Mutex
+	connState int32 // atomic connectionState
+	connCond  *sync.Cond
+	connMu    sync.Mutex
 
 	// Write loop channel (fixes API client locking)
 	writeCh       chan writeRequest
@@ -655,7 +655,6 @@ func (c *Client) CallWithContext(ctx context.Context, method string, params ...i
 		return nil, fmt.Errorf("request timeout: %s", method)
 	}
 }
-
 
 // Close closes the WebSocket connection.
 func (c *Client) Close() error {

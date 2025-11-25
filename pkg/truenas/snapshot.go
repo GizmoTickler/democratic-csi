@@ -64,19 +64,20 @@ func (c *Client) SnapshotDelete(snapshotID string, defer_ bool, recursive bool) 
 
 // SnapshotGet retrieves a snapshot by ID (dataset@snapshot format).
 func (c *Client) SnapshotGet(snapshotID string) (*Snapshot, error) {
-	filters := [][]interface{}{{"id", "=", snapshotID}}
-
-	result, err := c.Call("zfs.snapshot.query", filters, map[string]interface{}{})
+	result, err := c.Call("zfs.snapshot.get_instance", snapshotID)
 	if err != nil {
+		// Check for "Invalid params" which indicates not found for get_instance
+		if apiErr, ok := err.(*APIError); ok && apiErr.Code == -32602 {
+			return nil, fmt.Errorf("snapshot not found: %s", snapshotID)
+		}
+		// Also check standard IsNotFoundError
+		if IsNotFoundError(err) {
+			return nil, fmt.Errorf("snapshot not found: %s", snapshotID)
+		}
 		return nil, fmt.Errorf("failed to get snapshot: %w", err)
 	}
 
-	snapshots, ok := result.([]interface{})
-	if !ok || len(snapshots) == 0 {
-		return nil, fmt.Errorf("snapshot not found: %s", snapshotID)
-	}
-
-	return parseSnapshot(snapshots[0])
+	return parseSnapshot(result)
 }
 
 // SnapshotList lists snapshots for a dataset.
@@ -209,9 +210,24 @@ func parseSnapshot(data interface{}) (*Snapshot, error) {
 	// Parse properties
 	if props, ok := m["properties"].(map[string]interface{}); ok {
 		snap.Properties = props
+		// Also look for user properties in properties map (keys with :)
+		for key, val := range props {
+			if strings.Contains(key, ":") {
+				if propMap, ok := val.(map[string]interface{}); ok {
+					prop := UserProperty{}
+					if v, ok := propMap["value"].(string); ok {
+						prop.Value = v
+					}
+					if v, ok := propMap["source"].(string); ok {
+						prop.Source = v
+					}
+					snap.UserProperties[key] = prop
+				}
+			}
+		}
 	}
 
-	// Parse user properties
+	// Parse user properties (if explicitly returned in separate field)
 	if userProps, ok := m["user_properties"].(map[string]interface{}); ok {
 		for key, val := range userProps {
 			if propMap, ok := val.(map[string]interface{}); ok {

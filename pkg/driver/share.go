@@ -132,7 +132,7 @@ func (d *Driver) createISCSIShare(ctx context.Context, datasetName string, volum
 	}
 
 	// Create target
-	target, err := d.truenasClient.ISCSITargetCreate(iscsiName, "", "ISCSI", nil)
+	target, err := d.truenasClient.ISCSITargetCreate(iscsiName, "", "ISCSI", []truenas.ISCSITargetGroup{})
 	if err != nil {
 		return status.Errorf(codes.Internal, "failed to create iSCSI target: %v", err)
 	}

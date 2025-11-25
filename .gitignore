@@ -1,3 +1,4 @@
 **~
 dev
 /ci/bin/*dev*
+verification_tool.go
