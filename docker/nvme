@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# NVMe-oF commands need to run on the host system
+chroot /host /usr/bin/env -i PATH="/usr/sbin:/usr/bin:/sbin:/bin" nvme "${@:1}"
