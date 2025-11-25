@@ -1,18 +1,20 @@
 #!/bin/bash
 
-: "${ISCSIADM_HOST_STRATEGY:=chroot}"
-: "${ISCSIADM_HOST_PATH:=iscsiadm}"
+: "${ISCSIADM_HOST_STRATEGY:=nsenter}"
+: "${ISCSIADM_HOST_PATH:=/usr/sbin/iscsiadm}"
 
 echoerr() { printf "%s\n" "$*" >&2; }
 
 case ${ISCSIADM_HOST_STRATEGY} in
   chroot)
     # https://engineering.docker.com/2019/07/road-to-containing-iscsi/
-    chroot /host /usr/bin/env -i PATH="/usr/sbin:/usr/bin:/sbin:/bin" ${ISCSIADM_HOST_PATH} "${@:1}"
+    # Use direct path instead of env for compatibility with minimal OS like Talos
+    chroot /host ${ISCSIADM_HOST_PATH} "${@:1}"
     ;;
 
   nsenter)
     # https://github.com/siderolabs/extensions/issues/38#issuecomment-1125403043
+    # Preferred method for Talos and other minimal OS
     iscsid_pid=$(pgrep --exact --oldest iscsid)
     if [[ "${iscsid_pid}x" == "x" ]]; then
       echoerr "failed to find iscsid pid for nsenter"

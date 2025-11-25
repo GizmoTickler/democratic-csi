@@ -1,4 +1,31 @@
 #!/bin/bash
 
 # NVMe-oF commands need to run on the host system
-chroot /host /usr/bin/env -i PATH="/usr/sbin:/usr/bin:/sbin:/bin" nvme "${@:1}"
+# Use nsenter for compatibility with Talos and other minimal OS
+
+: "${NVME_HOST_STRATEGY:=nsenter}"
+: "${NVME_HOST_PATH:=/usr/sbin/nvme}"
+
+echoerr() { printf "%s\n" "$*" >&2; }
+
+case ${NVME_HOST_STRATEGY} in
+  chroot)
+    chroot /host ${NVME_HOST_PATH} "${@:1}"
+    ;;
+
+  nsenter)
+    # Find nvme-related process to get host namespace
+    nvme_pid=$(pgrep --exact --oldest nvme-cli 2>/dev/null || pgrep -f nvme 2>/dev/null | head -1)
+    if [[ "${nvme_pid}x" == "x" ]]; then
+      # Fallback to chroot if no nvme process found
+      chroot /host ${NVME_HOST_PATH} "${@:1}"
+    else
+      nsenter --mount="/proc/${nvme_pid}/ns/mnt" --net="/proc/${nvme_pid}/ns/net" -- ${NVME_HOST_PATH} "${@:1}"
+    fi
+    ;;
+
+  *)
+    echoerr "invalid NVME_HOST_STRATEGY: ${NVME_HOST_STRATEGY}"
+    exit 1
+    ;;
+esac
