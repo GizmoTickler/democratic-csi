@@ -33,31 +33,31 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install runtime dependencies
 # - nfs-common: NFS client for mounting NFS shares
-# - open-iscsi: iSCSI initiator for block storage
-# - nvme-cli: NVMe-oF client for NVMe over fabrics
 # - e2fsprogs, xfsprogs, btrfs-progs: filesystem tools for formatting
-# - util-linux: mount, findmnt, blkid utilities
+# - util-linux: findmnt, blkid utilities
 # - ca-certificates: for HTTPS connections to TrueNAS API
+# Note: open-iscsi and nvme-cli are NOT installed in container
+# because we use wrapper scripts to run commands on the host
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     nfs-common \
-    open-iscsi \
-    nvme-cli \
     e2fsprogs \
     xfsprogs \
     btrfs-progs \
     util-linux \
-    udev \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /var/cache/apt/archives/*
 
 # Copy binary from builder
 COPY --from=builder /build/truenas-csi /usr/local/bin/truenas-csi
 
-# Copy helper scripts for host command execution (iSCSI, mount operations)
-COPY docker/iscsiadm /usr/local/bin/iscsiadm-wrapper
-COPY docker/mount /usr/local/bin/mount-wrapper
-COPY docker/umount /usr/local/bin/umount-wrapper
+# Copy host command wrappers - these override system commands
+# and execute on the host via chroot /host
+# /usr/local/bin is first in PATH so these take precedence
+COPY docker/iscsiadm /usr/local/bin/iscsiadm
+COPY docker/nvme /usr/local/bin/nvme
+COPY docker/mount /usr/local/bin/mount
+COPY docker/umount /usr/local/bin/umount
 
 # Create directories for CSI socket and config
 RUN mkdir -p /csi /etc/truenas-csi
