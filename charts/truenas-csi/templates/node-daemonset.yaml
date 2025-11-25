@@ -97,7 +97,7 @@ spec:
               mountPropagation: Bidirectional
             - name: host-root
               mountPath: /host
-              mountPropagation: Bidirectional
+              mountPropagation: HostToContainer
             - name: host-dev
               mountPath: /dev
             - name: host-sys
