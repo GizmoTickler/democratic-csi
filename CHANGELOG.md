@@ -1,3 +1,13 @@
+# v2.2.10
+
+Release 2025-11-26
+
+**Bug Fixes:**
+- Fixed `SnapshotFindByName` to use regex filtering on the snapshot ID (BUG-006)
+  - The TrueNAS API `name` filter does not support short names (CSI Snapshot IDs)
+  - Switched to `id` filter with regex (`~`) to match the snapshot suffix regardless of parent dataset
+  - Fixes "Snapshot not found" errors during volume creation from snapshot and snapshot deletion
+
 # v2.2.9
 
 Release 2025-11-26

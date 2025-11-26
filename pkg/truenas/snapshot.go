@@ -146,11 +146,11 @@ func (c *Client) SnapshotListAll(ctx context.Context, parentDataset string, limi
 // The name parameter is the snapshot name without the dataset prefix (e.g., "my-snapshot" not "pool/dataset@my-snapshot").
 func (c *Client) SnapshotFindByName(ctx context.Context, parentDataset string, name string) (*Snapshot, error) {
 	// Build the full snapshot ID pattern to match: any dataset under parentDataset + @ + name
-	// We use "name" filter which matches the snapshot name part (after @)
-	// and "dataset" filter to restrict to our parent dataset
+	// We use "id" filter with regex match to find the snapshot regardless of its parent dataset
+	// The pattern matches any string ending with "@" + name
 	filters := [][]interface{}{
 		{"dataset", "^", parentDataset},
-		{"name", "=", name},
+		{"id", "~", fmt.Sprintf("@%s$", name)},
 	}
 
 	result, err := c.Call(ctx, "zfs.snapshot.query", filters, map[string]interface{}{})
