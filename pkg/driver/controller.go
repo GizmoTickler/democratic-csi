@@ -494,41 +494,32 @@ func (d *Driver) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequ
 	}
 	defer d.releaseOperationLock(lockKey)
 
-	// Find and delete the snapshot
-	// Snapshot ID format: dataset@snapshotname
-	snapshots, err := d.truenasClient.SnapshotListAll(d.config.ZFS.DatasetParentName)
+	// Find and delete the snapshot using efficient query (PERF-001 fix)
+	snap, err := d.truenasClient.SnapshotFindByName(d.config.ZFS.DatasetParentName, snapshotID)
 	if err != nil {
-		// If we can't list snapshots due to connection issue, return error
 		// If parent dataset doesn't exist, the snapshot is effectively deleted
 		if truenas.IsNotFoundError(err) {
 			klog.Infof("Snapshot %s parent not found, treating as deleted", snapshotID)
 			return &csi.DeleteSnapshotResponse{}, nil
 		}
-		return nil, status.Errorf(codes.Internal, "failed to list snapshots: %v", err)
+		return nil, status.Errorf(codes.Internal, "failed to find snapshot: %v", err)
 	}
 
-	found := false
-	for _, snap := range snapshots {
-		snapName := path.Base(strings.Split(snap.ID, "@")[1])
-		if snapName == snapshotID {
-			found = true
-			if err := d.truenasClient.SnapshotDelete(snap.ID, false, false); err != nil {
-				// Handle "not found" as success (idempotency)
-				if truenas.IsNotFoundError(err) {
-					klog.Infof("Snapshot %s already deleted", snapshotID)
-					break
-				}
-				klog.Errorf("Failed to delete snapshot %s: %v", snapshotID, err)
-				return nil, status.Errorf(codes.Internal, "failed to delete snapshot: %v", err)
-			}
-			klog.Infof("Snapshot %s deleted successfully", snapshotID)
-			break
-		}
-	}
-
-	if !found {
+	if snap == nil {
 		klog.Infof("Snapshot %s not found, treating as already deleted", snapshotID)
+		return &csi.DeleteSnapshotResponse{}, nil
 	}
+
+	if err := d.truenasClient.SnapshotDelete(snap.ID, false, false); err != nil {
+		// Handle "not found" as success (idempotency)
+		if truenas.IsNotFoundError(err) {
+			klog.Infof("Snapshot %s already deleted", snapshotID)
+			return &csi.DeleteSnapshotResponse{}, nil
+		}
+		klog.Errorf("Failed to delete snapshot %s: %v", snapshotID, err)
+		return nil, status.Errorf(codes.Internal, "failed to delete snapshot: %v", err)
+	}
+	klog.Infof("Snapshot %s deleted successfully", snapshotID)
 
 	return &csi.DeleteSnapshotResponse{}, nil
 }
@@ -549,10 +540,16 @@ func (d *Driver) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsReques
 			continue
 		}
 
+		// Extract snapshot name safely (BUG-002 fix)
+		snapshotID, ok := extractSnapshotName(snap.ID)
+		if !ok {
+			klog.V(4).Infof("Skipping snapshot with invalid ID format: %s", snap.ID)
+			continue
+		}
+
 		// Filter by snapshot ID if specified
 		if req.GetSnapshotId() != "" {
-			snapName := path.Base(strings.Split(snap.ID, "@")[1])
-			if snapName != req.GetSnapshotId() {
+			if snapshotID != req.GetSnapshotId() {
 				continue
 			}
 		}
@@ -566,7 +563,6 @@ func (d *Driver) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsReques
 			continue
 		}
 
-		snapshotID := path.Base(strings.Split(snap.ID, "@")[1])
 		entries = append(entries, &csi.ListSnapshotsResponse_Entry{
 			Snapshot: &csi.Snapshot{
 				SnapshotId:     snapshotID,
@@ -596,6 +592,13 @@ func (d *Driver) ControllerExpandVolume(ctx context.Context, req *csi.Controller
 	}
 
 	klog.Infof("ControllerExpandVolume: volumeID=%s, capacity=%d", volumeID, capacityBytes)
+
+	// Lock on volume ID (OTHER-004 fix: prevent concurrent expansions of same volume)
+	lockKey := "volume:" + volumeID
+	if !d.acquireOperationLock(lockKey) {
+		return nil, status.Error(codes.Aborted, "operation already in progress for this volume")
+	}
+	defer d.releaseOperationLock(lockKey)
 
 	datasetName := path.Join(d.config.ZFS.DatasetParentName, volumeID)
 
@@ -728,30 +731,23 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 		// Clone from snapshot
 		snapshotID := snapshot.GetSnapshotId()
 
-		// Find the snapshot
-		snapshots, err := d.truenasClient.SnapshotListAll(d.config.ZFS.DatasetParentName)
+		// Find the snapshot using efficient query (PERF-001 fix)
+		snap, err := d.truenasClient.SnapshotFindByName(d.config.ZFS.DatasetParentName, snapshotID)
 		if err != nil {
 			return status.Errorf(codes.Internal, "failed to find snapshot: %v", err)
 		}
 
-		var sourceSnapshot string
-		for _, snap := range snapshots {
-			snapName := path.Base(strings.Split(snap.ID, "@")[1])
-			if snapName == snapshotID {
-				sourceSnapshot = snap.ID
-				break
-			}
-		}
-
-		if sourceSnapshot == "" {
+		if snap == nil {
 			return status.Errorf(codes.NotFound, "snapshot not found: %s", snapshotID)
 		}
+
+		sourceSnapshot := snap.ID
 
 		if err := d.truenasClient.SnapshotClone(sourceSnapshot, datasetName); err != nil {
 			return status.Errorf(codes.Internal, "failed to clone snapshot: %v", err)
 		}
 
-		// Set content source properties in parallel
+		// Set content source properties in parallel (BUG-004 fix: log errors from Wait)
 		g, _ := errgroup.WithContext(ctx)
 		g.Go(func() error {
 			if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropVolumeContentSourceType, "snapshot"); err != nil {
@@ -765,7 +761,9 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 			}
 			return nil
 		})
-		_ = g.Wait()
+		if err := g.Wait(); err != nil {
+			klog.Warningf("Error setting content source properties for snapshot clone: %v", err)
+		}
 
 	} else if volume := source.GetVolume(); volume != nil {
 		// Clone from volume
@@ -786,7 +784,7 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 			return status.Errorf(codes.Internal, "failed to clone volume: %v", err)
 		}
 
-		// Set content source properties in parallel
+		// Set content source properties in parallel (BUG-004 fix: log errors from Wait)
 		g, _ := errgroup.WithContext(ctx)
 		g.Go(func() error {
 			if err := d.truenasClient.DatasetSetUserProperty(datasetName, PropVolumeContentSourceType, "volume"); err != nil {
@@ -800,7 +798,9 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 			}
 			return nil
 		})
-		_ = g.Wait()
+		if err := g.Wait(); err != nil {
+			klog.Warningf("Error setting content source properties for volume clone: %v", err)
+		}
 	}
 
 	return nil
@@ -867,4 +867,16 @@ func timestampProto(unixSeconds int64) *timestamppb.Timestamp {
 	return &timestamppb.Timestamp{
 		Seconds: unixSeconds,
 	}
+}
+
+// extractSnapshotName safely extracts the snapshot name from a ZFS snapshot ID.
+// ZFS snapshot IDs are in format "dataset@snapshotname".
+// Returns the snapshot name and true if valid, empty string and false if invalid.
+// (BUG-002 fix: prevents panic on invalid snapshot ID format)
+func extractSnapshotName(snapshotID string) (string, bool) {
+	parts := strings.Split(snapshotID, "@")
+	if len(parts) != 2 {
+		return "", false
+	}
+	return path.Base(parts[1]), true
 }

@@ -245,6 +245,21 @@ func (m *MockClient) SnapshotListAll(parentDataset string) ([]*Snapshot, error) 
 	return list, nil
 }
 
+func (m *MockClient) SnapshotFindByName(parentDataset string, name string) (*Snapshot, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.InjectError != nil {
+		return nil, m.InjectError
+	}
+	for _, snap := range m.Snapshots {
+		if snap.Name == name {
+			return snap, nil
+		}
+	}
+	return nil, nil // Not found, not an error
+}
+
 func (m *MockClient) SnapshotSetUserProperty(snapshotID string, key string, value string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

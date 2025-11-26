@@ -132,6 +132,35 @@ func (c *Client) SnapshotListAll(parentDataset string) ([]*Snapshot, error) {
 	return snapshots, nil
 }
 
+// SnapshotFindByName finds a snapshot by its short name under a parent dataset.
+// This is more efficient than SnapshotListAll + iteration (PERF-001 fix).
+// The name parameter is the snapshot name without the dataset prefix (e.g., "my-snapshot" not "pool/dataset@my-snapshot").
+func (c *Client) SnapshotFindByName(parentDataset string, name string) (*Snapshot, error) {
+	// Build the full snapshot ID pattern to match: any dataset under parentDataset + @ + name
+	// We use "name" filter which matches the snapshot name part (after @)
+	// and "dataset" filter to restrict to our parent dataset
+	filters := [][]interface{}{
+		{"dataset", "^", parentDataset},
+		{"name", "=", name},
+	}
+
+	result, err := c.Call("zfs.snapshot.query", filters, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query snapshots: %w", err)
+	}
+
+	items, ok := result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected response type")
+	}
+
+	if len(items) == 0 {
+		return nil, nil // Not found, not an error
+	}
+
+	return parseSnapshot(items[0])
+}
+
 // SnapshotSetUserProperty sets a user property on a snapshot.
 func (c *Client) SnapshotSetUserProperty(snapshotID string, key string, value string) error {
 	params := map[string]interface{}{

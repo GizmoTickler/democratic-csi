@@ -30,6 +30,7 @@ type ClientInterface interface {
 	SnapshotGet(snapshotID string) (*Snapshot, error)
 	SnapshotList(dataset string) ([]*Snapshot, error)
 	SnapshotListAll(parentDataset string) ([]*Snapshot, error)
+	SnapshotFindByName(parentDataset string, name string) (*Snapshot, error)
 	SnapshotSetUserProperty(snapshotID string, key string, value string) error
 	SnapshotClone(snapshotID string, newDatasetName string) error
 	SnapshotRollback(snapshotID string, force bool, recursive bool, recursiveClones bool) error

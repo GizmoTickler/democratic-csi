@@ -91,8 +91,11 @@ func (c *Client) NFSShareGet(id int) (*NFSShare, error) {
 }
 
 // NFSShareFindByPath finds an NFS share by path.
+// Uses API filtering for efficiency instead of fetching all shares (PERF-003 fix).
 func (c *Client) NFSShareFindByPath(path string) (*NFSShare, error) {
-	result, err := c.Call("sharing.nfs.query", []interface{}{}, map[string]interface{}{})
+	// Use API filter to search by path
+	filters := [][]interface{}{{"path", "=", path}}
+	result, err := c.Call("sharing.nfs.query", filters, map[string]interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query NFS shares: %w", err)
 	}
@@ -102,15 +105,28 @@ func (c *Client) NFSShareFindByPath(path string) (*NFSShare, error) {
 		return nil, fmt.Errorf("unexpected response format")
 	}
 
+	// If found by primary path, return it
+	if len(shares) > 0 {
+		return parseNFSShare(shares[0])
+	}
+
+	// Fallback: check paths array (for multi-path shares)
+	// TrueNAS API may store path in "paths" array instead of "path" field
+	// This requires fetching all shares since "paths" is an array field
+	result, err = c.Call("sharing.nfs.query", []interface{}{}, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query NFS shares: %w", err)
+	}
+
+	shares, ok = result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected response format")
+	}
+
 	for _, item := range shares {
 		share, err := parseNFSShare(item)
 		if err != nil {
 			continue
-		}
-
-		// Check primary path
-		if share.Path == path {
-			return share, nil
 		}
 
 		// Check paths array (for multi-path shares)
