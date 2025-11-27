@@ -33,6 +33,13 @@ var discoveryCache sync.Map // map[portal]time.Time
 // discoveryValidDuration is how long a cached discovery is considered valid.
 const discoveryValidDuration = 30 * time.Second
 
+// maxConcurrentLogins limits the number of concurrent iSCSI logins per portal.
+// TrueNAS iSCSI service can handle a few concurrent logins but gets slow with many.
+const maxConcurrentLogins = 2
+
+// portalLoginSemaphore limits concurrent logins per portal.
+var portalLoginSemaphore sync.Map // map[portal]chan struct{}
+
 // ISCSISession represents an active iSCSI session.
 type ISCSISession struct {
 	TargetPortal string
@@ -185,10 +192,21 @@ func iscsiDiscovery(portal string) error {
 	return nil
 }
 
-// iscsiLoginSerialized performs iSCSI login.
-// Note: Logins are NOT serialized because TrueNAS handles concurrent logins well.
-// Only discovery is serialized and cached since that's the slow operation.
+// getLoginSemaphore returns a semaphore for the given portal, creating one if needed.
+func getLoginSemaphore(portal string) chan struct{} {
+	sem, _ := portalLoginSemaphore.LoadOrStore(portal, make(chan struct{}, maxConcurrentLogins))
+	return sem.(chan struct{})
+}
+
+// iscsiLoginSerialized performs iSCSI login with limited concurrency.
+// Allows up to maxConcurrentLogins (2) concurrent logins per portal to prevent
+// overwhelming TrueNAS while still allowing some parallelism.
 func iscsiLoginSerialized(portal, iqn string) error {
+	// Acquire semaphore slot (blocks if maxConcurrentLogins already in progress)
+	sem := getLoginSemaphore(portal)
+	sem <- struct{}{}
+	defer func() { <-sem }()
+
 	return iscsiLogin(portal, iqn)
 }
 
