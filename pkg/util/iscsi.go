@@ -185,14 +185,10 @@ func iscsiDiscovery(portal string) error {
 	return nil
 }
 
-// iscsiLoginSerialized performs iSCSI login with serialization per portal.
-// This prevents overwhelming TrueNAS when multiple volumes try to login simultaneously.
+// iscsiLoginSerialized performs iSCSI login.
+// Note: Logins are NOT serialized because TrueNAS handles concurrent logins well.
+// Only discovery is serialized and cached since that's the slow operation.
 func iscsiLoginSerialized(portal, iqn string) error {
-	// Acquire portal-specific mutex to serialize logins
-	mutex := getPortalMutex(portal)
-	mutex.Lock()
-	defer mutex.Unlock()
-
 	return iscsiLogin(portal, iqn)
 }
 
