@@ -1,3 +1,14 @@
+# v2.2.19
+
+Release 2025-11-27
+
+**Bug Fixes:**
+- Added automatic cleanup of orphaned clone datasets during snapshot deletion (BUG-012)
+  - When snapshot deletion fails due to clones, automatically attempt to delete orphaned clones
+  - Orphaned clones occur when volume deletion fails during TrueNAS overload
+  - After cleaning up orphaned clones, retry the snapshot deletion
+  - Added `GetClones()` method to Snapshot struct to retrieve clone dataset names
+
 # v2.2.18
 
 Release 2025-11-27

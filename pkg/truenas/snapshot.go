@@ -44,6 +44,8 @@ func (c *Client) SnapshotCreate(ctx context.Context, dataset string, name string
 }
 
 // SnapshotDelete deletes a ZFS snapshot.
+// If the snapshot has orphaned clones (from failed volume deletions), it will attempt
+// to delete those clones first before deleting the snapshot.
 func (c *Client) SnapshotDelete(ctx context.Context, snapshotID string, defer_ bool, recursive bool) error {
 	options := map[string]interface{}{
 		"defer":     defer_,
@@ -63,12 +65,35 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapshotID string, defer_ b
 		// Check if snapshot exists to distinguish between these cases
 		if strings.Contains(err.Error(), "Invalid params") {
 			// Try to get the snapshot - if it doesn't exist, treat as success
-			_, getErr := c.SnapshotGet(ctx, snapshotID)
+			snap, getErr := c.SnapshotGet(ctx, snapshotID)
 			if getErr != nil {
 				// Snapshot doesn't exist, treat delete as successful
 				return nil
 			}
-			// Snapshot exists but can't be deleted (likely has clones)
+
+			// Snapshot exists - check if it has clones we can clean up
+			clones := snap.GetClones()
+			if len(clones) > 0 {
+				// Attempt to delete orphaned clones
+				for _, cloneDataset := range clones {
+					// Try to delete the clone dataset - these are likely orphaned
+					// from failed volume deletions during TrueNAS overload
+					if delErr := c.DatasetDelete(ctx, cloneDataset, false, true); delErr != nil {
+						// Log but continue - clone might still be in use
+						continue
+					}
+				}
+
+				// Retry snapshot deletion after cleaning up clones
+				_, retryErr := c.Call(ctx, "zfs.snapshot.delete", snapshotID, options)
+				if retryErr == nil {
+					return nil
+				}
+				// Still failed - return the original error with context
+				return fmt.Errorf("failed to delete snapshot (has clones: %v): %w", clones, err)
+			}
+
+			// Snapshot exists but can't be deleted for unknown reason
 			return fmt.Errorf("failed to delete snapshot (may have clones): %w", err)
 		}
 		return fmt.Errorf("failed to delete snapshot: %w", err)
@@ -320,4 +345,17 @@ func (snap *Snapshot) GetCreationTime() int64 {
 		}
 	}
 	return 0
+}
+
+// GetClones returns a list of clone dataset names that were created from this snapshot.
+func (snap *Snapshot) GetClones() []string {
+	if clones, ok := snap.Properties["clones"]; ok {
+		if clonesMap, ok := clones.(map[string]interface{}); ok {
+			if value, ok := clonesMap["value"].(string); ok && value != "" {
+				// Clones are comma-separated
+				return strings.Split(value, ",")
+			}
+		}
+	}
+	return nil
 }
