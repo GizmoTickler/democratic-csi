@@ -479,3 +479,28 @@ func (c *Client) ISCSITargetExtentFindByTarget(ctx context.Context, targetID int
 
 	return results, nil
 }
+
+// ISCSITargetExtentFindByExtent finds all target-extent associations for an extent.
+func (c *Client) ISCSITargetExtentFindByExtent(ctx context.Context, extentID int) ([]*ISCSITargetExtent, error) {
+	filters := [][]interface{}{{"extent", "=", extentID}}
+	result, err := c.Call(ctx, "iscsi.targetextent.query", filters, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query target-extent associations: %w", err)
+	}
+
+	assocs, ok := result.([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	var results []*ISCSITargetExtent
+	for _, a := range assocs {
+		te, err := parseISCSITargetExtent(a)
+		if err != nil {
+			continue
+		}
+		results = append(results, te)
+	}
+
+	return results, nil
+}

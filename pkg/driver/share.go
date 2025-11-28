@@ -378,8 +378,19 @@ func (d *Driver) createISCSIShare(ctx context.Context, datasetName string, volum
 }
 
 // deleteISCSIShare deletes iSCSI resources for a dataset.
+// It tries to delete by stored property IDs first, then falls back to lookup by name
+// to handle cases where properties were never stored (e.g., failed volume creation).
 func (d *Driver) deleteISCSIShare(ctx context.Context, datasetName string) error {
-	// Delete target-extent association
+	// Generate the expected iSCSI name (same logic as createISCSIShare)
+	iscsiName := path.Base(datasetName)
+	if d.config.ISCSI.NameSuffix != "" {
+		iscsiName = iscsiName + d.config.ISCSI.NameSuffix
+	}
+	diskPath := fmt.Sprintf("zvol/%s", datasetName)
+
+	var extDeleted, tgtDeleted bool
+
+	// Try to delete target-extent association by stored ID
 	if teIDStr, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSITargetExtentID); teIDStr != "" && teIDStr != "-" {
 		if teID, err := strconv.Atoi(teIDStr); err == nil {
 			if err := d.truenasClient.ISCSITargetExtentDelete(ctx, teID, true); err != nil {
@@ -388,20 +399,66 @@ func (d *Driver) deleteISCSIShare(ctx context.Context, datasetName string) error
 		}
 	}
 
-	// Delete extent
+	// Try to delete extent by stored ID
 	if extIDStr, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSIExtentID); extIDStr != "" && extIDStr != "-" {
 		if extID, err := strconv.Atoi(extIDStr); err == nil {
 			if err := d.truenasClient.ISCSIExtentDelete(ctx, extID, false, true); err != nil {
 				klog.Warningf("Failed to delete iSCSI extent %d: %v", extID, err)
+			} else {
+				extDeleted = true
 			}
 		}
 	}
 
-	// Delete target
+	// Try to delete target by stored ID
 	if tgtIDStr, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSITargetID); tgtIDStr != "" && tgtIDStr != "-" {
 		if tgtID, err := strconv.Atoi(tgtIDStr); err == nil {
 			if err := d.truenasClient.ISCSITargetDelete(ctx, tgtID, true); err != nil {
 				klog.Warningf("Failed to delete iSCSI target %d: %v", tgtID, err)
+			} else {
+				tgtDeleted = true
+			}
+		}
+	}
+
+	// Fallback: If extent was not deleted by ID, try to find and delete by disk path
+	// This handles cases where the dataset properties were never stored
+	if !extDeleted {
+		if extent, err := d.truenasClient.ISCSIExtentFindByDisk(ctx, diskPath); err == nil && extent != nil {
+			klog.V(4).Infof("Found orphaned extent by disk path %s (ID %d), deleting", diskPath, extent.ID)
+			// First delete any target-extent associations for this extent
+			if assocs, err := d.truenasClient.ISCSITargetExtentFindByExtent(ctx, extent.ID); err == nil {
+				for _, assoc := range assocs {
+					if err := d.truenasClient.ISCSITargetExtentDelete(ctx, assoc.ID, true); err != nil {
+						klog.Warningf("Failed to delete orphaned target-extent %d: %v", assoc.ID, err)
+					}
+				}
+			}
+			if err := d.truenasClient.ISCSIExtentDelete(ctx, extent.ID, false, true); err != nil {
+				klog.Warningf("Failed to delete orphaned extent %d: %v", extent.ID, err)
+			} else {
+				extDeleted = true
+			}
+		}
+	}
+
+	// Fallback: If target was not deleted by ID, try to find and delete by name
+	// This handles cases where target was created but property was never stored
+	if !tgtDeleted {
+		if target, err := d.truenasClient.ISCSITargetFindByName(ctx, iscsiName); err == nil && target != nil {
+			klog.V(4).Infof("Found orphaned target by name %s (ID %d), deleting", iscsiName, target.ID)
+			// First delete any target-extent associations for this target
+			if assocs, err := d.truenasClient.ISCSITargetExtentFindByTarget(ctx, target.ID); err == nil {
+				for _, assoc := range assocs {
+					if err := d.truenasClient.ISCSITargetExtentDelete(ctx, assoc.ID, true); err != nil {
+						klog.Warningf("Failed to delete orphaned target-extent %d: %v", assoc.ID, err)
+					}
+				}
+			}
+			if err := d.truenasClient.ISCSITargetDelete(ctx, target.ID, true); err != nil {
+				klog.Warningf("Failed to delete orphaned target %d: %v", target.ID, err)
+			} else {
+				tgtDeleted = true
 			}
 		}
 	}

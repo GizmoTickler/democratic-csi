@@ -64,6 +64,7 @@ type ClientInterface interface {
 	ISCSITargetExtentDelete(ctx context.Context, id int, force bool) error
 	ISCSITargetExtentFind(ctx context.Context, targetID int, extentID int) (*ISCSITargetExtent, error)
 	ISCSITargetExtentFindByTarget(ctx context.Context, targetID int) ([]*ISCSITargetExtent, error)
+	ISCSITargetExtentFindByExtent(ctx context.Context, extentID int) ([]*ISCSITargetExtent, error)
 	ISCSIGlobalConfigGet(ctx context.Context) (*ISCSIGlobalConfig, error)
 
 	// NVMe-oF methods

@@ -507,6 +507,18 @@ func (m *MockClient) ISCSITargetExtentFindByTarget(ctx context.Context, targetID
 	}
 	return results, nil
 }
+func (m *MockClient) ISCSITargetExtentFindByExtent(ctx context.Context, extentID int) ([]*ISCSITargetExtent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []*ISCSITargetExtent
+	for _, te := range m.TargetExtents {
+		if te.Extent == extentID {
+			results = append(results, te)
+		}
+	}
+	return results, nil
+}
 func (m *MockClient) ISCSIGlobalConfigGet(ctx context.Context) (*ISCSIGlobalConfig, error) {
 	return &ISCSIGlobalConfig{Basename: "iqn.2005-10.org.freenas.ctl"}, nil
 }

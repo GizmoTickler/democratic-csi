@@ -1,3 +1,20 @@
+# v2.2.26
+
+Release 2025-11-28
+
+**Bug Fixes:**
+- Fixed orphaned iSCSI resources during failed volume creation (BUG-015)
+  - Volume deletion now uses fallback cleanup by name/disk path when stored property IDs are missing
+  - Handles cases where volume creation failed after creating target but before storing properties
+  - Added `ISCSITargetExtentFindByExtent` method for finding associations by extent ID
+  - Cleanup now properly deletes target-extent associations before removing orphaned resources
+
+**Improvements:**
+- Enhanced iSCSI audit tool with proper session detection
+  - Fixed session detection to use `target_alias` field from TrueNAS API
+  - Added debug mode (`-debug-sessions`) to dump raw session data
+  - Improved target name to ID mapping for session tracking
+
 # v2.2.25
 
 Release 2025-11-28
