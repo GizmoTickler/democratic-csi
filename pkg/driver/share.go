@@ -436,8 +436,6 @@ func (d *Driver) deleteISCSIShare(ctx context.Context, datasetName string) error
 			}
 			if err := d.truenasClient.ISCSIExtentDelete(ctx, extent.ID, false, true); err != nil {
 				klog.Warningf("Failed to delete orphaned extent %d: %v", extent.ID, err)
-			} else {
-				extDeleted = true
 			}
 		}
 	}
@@ -457,8 +455,6 @@ func (d *Driver) deleteISCSIShare(ctx context.Context, datasetName string) error
 			}
 			if err := d.truenasClient.ISCSITargetDelete(ctx, target.ID, true); err != nil {
 				klog.Warningf("Failed to delete orphaned target %d: %v", target.ID, err)
-			} else {
-				tgtDeleted = true
 			}
 		}
 	}
