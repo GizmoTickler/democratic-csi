@@ -835,9 +835,9 @@ func GetISCSIInfoFromDevice(devicePath string) (string, string, error) {
 		globPattern := filepath.Join(sessionDir, "iscsi_session", "session*", "targetname")
 		matches, _ := filepath.Glob(globPattern)
 		if len(matches) > 0 {
-			content, err := os.ReadFile(matches[0])
-			if err == nil {
-				iqn = strings.TrimSpace(string(content))
+			fallbackContent, readErr := os.ReadFile(matches[0])
+			if readErr == nil {
+				iqn = strings.TrimSpace(string(fallbackContent))
 			}
 		}
 	}
