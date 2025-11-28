@@ -138,34 +138,38 @@ func ISCSIConnectWithOptions(portal, iqn string, lun int, opts *ISCSIConnectOpti
 	loginStart := time.Now()
 	loginErr := iscsiLoginSerialized(portal, iqn)
 	if loginErr != nil && isTargetNotFoundError(loginErr) {
-		klog.Warningf("iSCSI login failed (target not found), will retry with fresh discovery: %v", loginErr)
+		klog.Warningf("iSCSI login failed for %s (target not found in discovery), will retry with fresh discovery: %v", iqn, loginErr)
 
 		retryDelay := initialDiscoveryRetryDelay
 		for attempt := 1; attempt <= maxDiscoveryRetries; attempt++ {
 			// Wait before retry to give TrueNAS time to propagate the target
-			klog.Infof("Waiting %v before discovery retry %d/%d for %s", retryDelay, attempt, maxDiscoveryRetries, iqn)
+			klog.Infof("iSCSI retry %d/%d: waiting %v before fresh discovery for %s (elapsed: %v)",
+				attempt, maxDiscoveryRetries, retryDelay, iqn, time.Since(start))
 			time.Sleep(retryDelay)
 
 			// Invalidate cache and perform fresh discovery
 			invalidateDiscoveryCache(portal)
 			if discoverErr := iscsiDiscoverySerialized(portal); discoverErr != nil {
-				klog.Warningf("Discovery retry %d failed: %v", attempt, discoverErr)
+				klog.Warningf("iSCSI retry %d/%d: discovery failed for portal %s: %v", attempt, maxDiscoveryRetries, portal, discoverErr)
 				// Continue to next retry
 			} else {
-				klog.Infof("Fresh iSCSI discovery completed on attempt %d, retrying login", attempt)
+				klog.Infof("iSCSI retry %d/%d: fresh discovery completed for portal %s, attempting login to %s",
+					attempt, maxDiscoveryRetries, portal, iqn)
 
 				// Retry login
 				loginErr = iscsiLoginSerialized(portal, iqn)
 				if loginErr == nil {
-					klog.Infof("iSCSI login succeeded after %d discovery retries", attempt)
+					klog.Infof("iSCSI login succeeded for %s after %d discovery retries (total elapsed: %v)",
+						iqn, attempt, time.Since(start))
 					break
 				}
 
 				if !isTargetNotFoundError(loginErr) {
 					// Different error, don't retry
-					return "", fmt.Errorf("login failed after discovery retry %d: %w", attempt, loginErr)
+					return "", fmt.Errorf("login failed for %s after discovery retry %d: %w", iqn, attempt, loginErr)
 				}
-				klog.Warningf("Login retry %d still failed (target not found): %v", attempt, loginErr)
+				klog.Warningf("iSCSI retry %d/%d: login still failed for %s (target not found): %v",
+					attempt, maxDiscoveryRetries, iqn, loginErr)
 			}
 
 			// Exponential backoff with cap
@@ -176,12 +180,13 @@ func ISCSIConnectWithOptions(portal, iqn string, lun int, opts *ISCSIConnectOpti
 		}
 
 		if loginErr != nil {
-			return "", fmt.Errorf("login failed after %d discovery retries: %w", maxDiscoveryRetries, loginErr)
+			return "", fmt.Errorf("iSCSI login failed for %s after %d discovery retries (total elapsed: %v): %w",
+				iqn, maxDiscoveryRetries, time.Since(start), loginErr)
 		}
 	} else if loginErr != nil {
-		return "", fmt.Errorf("login failed: %w", loginErr)
+		return "", fmt.Errorf("iSCSI login failed for %s: %w", iqn, loginErr)
 	}
-	klog.Infof("iSCSI login completed in %v", time.Since(loginStart))
+	klog.Infof("iSCSI login completed for %s in %v", iqn, time.Since(loginStart))
 
 	// Wait for device to appear
 	deviceStart := time.Now()
