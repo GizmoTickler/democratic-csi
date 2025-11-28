@@ -437,3 +437,45 @@ func parseISCSIGlobalConfig(data interface{}) (*ISCSIGlobalConfig, error) {
 
 	return cfg, nil
 }
+
+// ISCSIExtentFindByDisk finds an iSCSI extent by disk path.
+// This is useful for idempotent extent creation when the zvol path is known.
+func (c *Client) ISCSIExtentFindByDisk(ctx context.Context, diskPath string) (*ISCSIExtent, error) {
+	filters := [][]interface{}{{"disk", "=", diskPath}}
+	result, err := c.Call(ctx, "iscsi.extent.query", filters, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query iSCSI extents by disk: %w", err)
+	}
+
+	extents, ok := result.([]interface{})
+	if !ok || len(extents) == 0 {
+		return nil, nil
+	}
+
+	return parseISCSIExtent(extents[0])
+}
+
+// ISCSITargetExtentFindByTarget finds all target-extent associations for a target.
+func (c *Client) ISCSITargetExtentFindByTarget(ctx context.Context, targetID int) ([]*ISCSITargetExtent, error) {
+	filters := [][]interface{}{{"target", "=", targetID}}
+	result, err := c.Call(ctx, "iscsi.targetextent.query", filters, map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query target-extent associations: %w", err)
+	}
+
+	assocs, ok := result.([]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	var results []*ISCSITargetExtent
+	for _, a := range assocs {
+		te, err := parseISCSITargetExtent(a)
+		if err != nil {
+			continue
+		}
+		results = append(results, te)
+	}
+
+	return results, nil
+}

@@ -4,7 +4,50 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+
+	"k8s.io/klog/v2"
 )
+
+// apiMethodPrefix stores the detected API prefix for snapshot methods.
+// TrueNAS 24.x uses "zfs.snapshot.*", while 25.04+ may use "pool.snapshot.*"
+var (
+	snapshotAPIPrefix     string
+	snapshotAPIPrefixOnce sync.Once
+)
+
+// detectSnapshotAPIPrefix detects which API prefix to use for snapshot methods.
+// This provides compatibility between TrueNAS 24.x (zfs.snapshot.*) and 25.04+ (pool.snapshot.*).
+func (c *Client) detectSnapshotAPIPrefix(ctx context.Context) string {
+	snapshotAPIPrefixOnce.Do(func() {
+		// Try pool.snapshot.query first (TrueNAS 25.04+)
+		_, err := c.Call(ctx, "pool.snapshot.query", [][]interface{}{}, map[string]interface{}{"limit": 1})
+		if err == nil {
+			snapshotAPIPrefix = "pool.snapshot"
+			klog.V(2).Infof("Detected TrueNAS 25.04+ API (pool.snapshot.*)")
+			return
+		}
+
+		// Fall back to zfs.snapshot.query (TrueNAS 24.x)
+		_, err = c.Call(ctx, "zfs.snapshot.query", [][]interface{}{}, map[string]interface{}{"limit": 1})
+		if err == nil {
+			snapshotAPIPrefix = "zfs.snapshot"
+			klog.V(2).Infof("Detected TrueNAS 24.x API (zfs.snapshot.*)")
+			return
+		}
+
+		// Default to zfs.snapshot if both fail (shouldn't happen)
+		snapshotAPIPrefix = "zfs.snapshot"
+		klog.Warningf("Could not detect snapshot API prefix, defaulting to zfs.snapshot.*")
+	})
+	return snapshotAPIPrefix
+}
+
+// snapshotMethod returns the full API method name for a snapshot operation.
+func (c *Client) snapshotMethod(ctx context.Context, operation string) string {
+	prefix := c.detectSnapshotAPIPrefix(ctx)
+	return prefix + "." + operation
+}
 
 // Snapshot represents a ZFS snapshot from the TrueNAS API.
 type Snapshot struct {
@@ -31,7 +74,7 @@ func (c *Client) SnapshotCreate(ctx context.Context, dataset string, name string
 		Name:    name,
 	}
 
-	result, err := c.Call(ctx, "zfs.snapshot.create", params)
+	result, err := c.Call(ctx, c.snapshotMethod(ctx, "create"), params)
 	if err != nil {
 		// Ignore "already exists" errors
 		if strings.Contains(err.Error(), "already exists") {
@@ -52,7 +95,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapshotID string, defer_ b
 		"recursive": recursive,
 	}
 
-	_, err := c.Call(ctx, "zfs.snapshot.delete", snapshotID, options)
+	_, err := c.Call(ctx, c.snapshotMethod(ctx, "delete"), snapshotID, options)
 	if err != nil {
 		// Ignore "does not exist" errors
 		if strings.Contains(err.Error(), "does not exist") ||
@@ -85,7 +128,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapshotID string, defer_ b
 				}
 
 				// Retry snapshot deletion after cleaning up clones
-				_, retryErr := c.Call(ctx, "zfs.snapshot.delete", snapshotID, options)
+				_, retryErr := c.Call(ctx, c.snapshotMethod(ctx, "delete"), snapshotID, options)
 				if retryErr == nil {
 					return nil
 				}
@@ -104,7 +147,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapshotID string, defer_ b
 
 // SnapshotGet retrieves a snapshot by ID (dataset@snapshot format).
 func (c *Client) SnapshotGet(ctx context.Context, snapshotID string) (*Snapshot, error) {
-	result, err := c.Call(ctx, "zfs.snapshot.get_instance", snapshotID)
+	result, err := c.Call(ctx, c.snapshotMethod(ctx, "get_instance"), snapshotID)
 	if err != nil {
 		// Check for "Invalid params" which indicates not found for get_instance
 		if apiErr, ok := err.(*APIError); ok && apiErr.Code == -32602 {
@@ -124,7 +167,7 @@ func (c *Client) SnapshotGet(ctx context.Context, snapshotID string) (*Snapshot,
 func (c *Client) SnapshotList(ctx context.Context, dataset string) ([]*Snapshot, error) {
 	filters := [][]interface{}{{"dataset", "=", dataset}}
 
-	result, err := c.Call(ctx, "zfs.snapshot.query", filters, map[string]interface{}{})
+	result, err := c.Call(ctx, c.snapshotMethod(ctx, "query"), filters, map[string]interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list snapshots: %w", err)
 	}
@@ -158,7 +201,7 @@ func (c *Client) SnapshotListAll(ctx context.Context, parentDataset string, limi
 		options["offset"] = offset
 	}
 
-	result, err := c.Call(ctx, "zfs.snapshot.query", filters, options)
+	result, err := c.Call(ctx, c.snapshotMethod(ctx, "query"), filters, options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list snapshots: %w", err)
 	}
@@ -192,7 +235,7 @@ func (c *Client) SnapshotFindByName(ctx context.Context, parentDataset string, n
 		{"id", "~", fmt.Sprintf(".*@%s$", name)},
 	}
 
-	result, err := c.Call(ctx, "zfs.snapshot.query", filters, map[string]interface{}{})
+	result, err := c.Call(ctx, c.snapshotMethod(ctx, "query"), filters, map[string]interface{}{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query snapshots: %w", err)
 	}
@@ -217,7 +260,7 @@ func (c *Client) SnapshotSetUserProperty(ctx context.Context, snapshotID string,
 		},
 	}
 
-	_, err := c.Call(ctx, "zfs.snapshot.update", snapshotID, params)
+	_, err := c.Call(ctx, c.snapshotMethod(ctx, "update"), snapshotID, params)
 	return err
 }
 
@@ -228,7 +271,7 @@ func (c *Client) SnapshotClone(ctx context.Context, snapshotID string, newDatase
 		"dataset_dst": newDatasetName,
 	}
 
-	_, err := c.Call(ctx, "zfs.snapshot.clone", params)
+	_, err := c.Call(ctx, c.snapshotMethod(ctx, "clone"), params)
 	if err != nil {
 		// Ignore "already exists" errors
 		if strings.Contains(err.Error(), "already exists") {
@@ -248,7 +291,7 @@ func (c *Client) SnapshotRollback(ctx context.Context, snapshotID string, force 
 		"recursive_clones": recursiveClones,
 	}
 
-	_, err := c.Call(ctx, "zfs.snapshot.rollback", snapshotID, options)
+	_, err := c.Call(ctx, c.snapshotMethod(ctx, "rollback"), snapshotID, options)
 	if err != nil {
 		return fmt.Errorf("failed to rollback snapshot: %w", err)
 	}

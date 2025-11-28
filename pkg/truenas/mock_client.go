@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // MockClient is a mock implementation of ClientInterface for testing.
@@ -178,6 +179,22 @@ func (m *MockClient) GetPoolAvailable(ctx context.Context, poolName string) (int
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.PoolAvailable, nil
+}
+
+func (m *MockClient) DatasetExists(ctx context.Context, name string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	_, ok := m.Datasets[name]
+	return ok, nil
+}
+
+func (m *MockClient) WaitForDatasetReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error) {
+	return m.DatasetGet(ctx, name)
+}
+
+func (m *MockClient) WaitForZvolReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error) {
+	return m.DatasetGet(ctx, name)
 }
 
 // Snapshot methods
@@ -435,6 +452,17 @@ func (m *MockClient) ISCSIExtentFindByName(ctx context.Context, name string) (*I
 	}
 	return nil, nil
 }
+func (m *MockClient) ISCSIExtentFindByDisk(ctx context.Context, diskPath string) (*ISCSIExtent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, e := range m.ISCSIExtents {
+		if e.Disk == diskPath {
+			return e, nil
+		}
+	}
+	return nil, nil
+}
 func (m *MockClient) ISCSITargetExtentCreate(ctx context.Context, targetID int, extentID int, lunID int) (*ISCSITargetExtent, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -461,6 +489,18 @@ func (m *MockClient) ISCSITargetExtentFind(ctx context.Context, targetID int, ex
 		}
 	}
 	return nil, nil
+}
+func (m *MockClient) ISCSITargetExtentFindByTarget(ctx context.Context, targetID int) ([]*ISCSITargetExtent, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var results []*ISCSITargetExtent
+	for _, te := range m.TargetExtents {
+		if te.Target == targetID {
+			results = append(results, te)
+		}
+	}
+	return results, nil
 }
 func (m *MockClient) ISCSIGlobalConfigGet(ctx context.Context) (*ISCSIGlobalConfig, error) {
 	return &ISCSIGlobalConfig{Basename: "iqn.2005-10.org.freenas.ctl"}, nil
