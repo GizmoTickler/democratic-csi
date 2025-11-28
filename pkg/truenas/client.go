@@ -721,6 +721,7 @@ func (c *Client) Call(ctx context.Context, method string, params ...interface{})
 
 // CallWithContext makes a JSON-RPC call with a context using the connection pool.
 // Uses a semaphore to limit concurrent requests and prevent overwhelming TrueNAS.
+// Implements automatic retry on connection errors with exponential backoff.
 func (c *Client) CallWithContext(ctx context.Context, method string, params ...interface{}) (interface{}, error) {
 	// Acquire semaphore slot (limit concurrent requests)
 	select {
@@ -731,10 +732,63 @@ func (c *Client) CallWithContext(ctx context.Context, method string, params ...i
 	}
 	defer func() { <-c.semaphore }() // Release slot when done
 
-	// Round-robin selection
-	idx := atomic.AddUint64(&c.next, 1) % uint64(len(c.pool))
-	conn := c.pool[idx]
-	return conn.CallWithContext(ctx, method, params...)
+	const maxRetries = 3
+	var lastErr error
+	retryDelay := 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Select best available connection
+		conn := c.selectConnection()
+
+		result, err := conn.CallWithContext(ctx, method, params...)
+		if err == nil {
+			return result, nil
+		}
+
+		// Check if error is retryable (connection-related)
+		if !IsConnectionError(err) {
+			// Not a connection error - return immediately (API errors, not found, etc.)
+			return nil, err
+		}
+
+		lastErr = err
+		klog.V(2).Infof("API call %s failed on conn %d (attempt %d/%d): %v", method, conn.id, attempt+1, maxRetries, err)
+
+		// Don't retry on last attempt or if context is done
+		if attempt < maxRetries-1 {
+			select {
+			case <-time.After(retryDelay):
+				retryDelay *= 2 // Exponential backoff
+				if retryDelay > 5*time.Second {
+					retryDelay = 5 * time.Second
+				}
+			case <-ctx.Done():
+				return nil, fmt.Errorf("context cancelled during retry: %w", ctx.Err())
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("API call %s failed after %d retries: %w", method, maxRetries, lastErr)
+}
+
+// selectConnection selects the best available connection from the pool.
+// Prefers connected connections and uses round-robin for load balancing.
+func (c *Client) selectConnection() *Connection {
+	poolSize := uint64(len(c.pool))
+
+	// Try to find a connected connection using round-robin
+	startIdx := atomic.AddUint64(&c.next, 1) % poolSize
+	for i := uint64(0); i < poolSize; i++ {
+		idx := (startIdx + i) % poolSize
+		conn := c.pool[idx]
+		if conn.IsConnected() {
+			return conn
+		}
+	}
+
+	// No connected connections - return the round-robin selection
+	// The connection will attempt to reconnect when used
+	return c.pool[startIdx]
 }
 
 // Close closes all connections in the pool.

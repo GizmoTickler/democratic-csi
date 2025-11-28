@@ -5,11 +5,21 @@ import (
 	"fmt"
 	"path"
 	"strconv"
+	"time"
 
 	"github.com/GizmoTickler/truenas-scale-csi/pkg/truenas"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
+)
+
+const (
+	// defaultShareRetryAttempts is the number of times to retry share creation
+	defaultShareRetryAttempts = 3
+	// defaultShareRetryDelay is the initial delay between retry attempts
+	defaultShareRetryDelay = 2 * time.Second
+	// zvolReadyTimeout is how long to wait for a zvol to be ready before creating extent
+	zvolReadyTimeout = 30 * time.Second
 )
 
 // createShare creates the appropriate share type (NFS, iSCSI, or NVMe-oF) for a dataset.
@@ -112,88 +122,213 @@ func (d *Driver) deleteNFSShare(ctx context.Context, datasetName string) error {
 }
 
 // createISCSIShare creates iSCSI target, extent, and target-extent association.
+// This function is idempotent and includes retry logic for robustness during
+// high-load scenarios (e.g., volsync backup bursts).
 func (d *Driver) createISCSIShare(ctx context.Context, datasetName string, volumeName string) error {
-	// Check if already configured
-	existingProp, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSITargetExtentID)
-	if existingProp != "" && existingProp != "-" {
-		klog.Infof("iSCSI share already exists for %s", datasetName)
-		return nil
-	}
+	start := time.Now()
+	klog.Infof("createISCSIShare: starting for dataset %s", datasetName)
 
-	// Generate iSCSI name
+	// Generate iSCSI name and disk path upfront
 	iscsiName := path.Base(datasetName)
-	// We do NOT prepend the NamePrefix (IQN) here because TrueNAS API seems to fail/hang
-	// if we provide the full IQN as the name. We let TrueNAS handle the IQN generation
-	// or treat the name as a suffix.
-	// if d.config.ISCSI.NamePrefix != "" {
-	// 	iscsiName = d.config.ISCSI.NamePrefix + iscsiName
-	// }
 	if d.config.ISCSI.NameSuffix != "" {
 		iscsiName = iscsiName + d.config.ISCSI.NameSuffix
 	}
-
-	// Create target with configured target groups (portal + initiator)
-	targetGroups := []truenas.ISCSITargetGroup{}
-	for _, tg := range d.config.ISCSI.TargetGroups {
-		var auth *int
-		if tg.Auth != nil && *tg.Auth > 0 {
-			auth = tg.Auth
-		}
-		targetGroups = append(targetGroups, truenas.ISCSITargetGroup{
-			Portal:     tg.Portal,
-			Initiator:  tg.Initiator,
-			AuthMethod: tg.AuthMethod,
-			Auth:       auth,
-		})
-	}
-	// Create target
-	// We pass empty string for alias to avoid potential issues with long names or special characters
-	target, err := d.truenasClient.ISCSITargetCreate(ctx, iscsiName, "", "ISCSI", targetGroups)
-	if err != nil {
-		return status.Errorf(codes.Internal, "failed to create iSCSI target: %v", err)
-	}
-	if err := d.truenasClient.DatasetSetUserProperty(ctx, datasetName, PropISCSITargetID, strconv.Itoa(target.ID)); err != nil {
-		return status.Errorf(codes.Internal, "failed to store iSCSI target ID: %v", err)
-	}
-
-	// Create extent
 	diskPath := fmt.Sprintf("zvol/%s", datasetName)
-	comment := fmt.Sprintf("truenas-csi: %s", datasetName)
 
-	extent, err := d.truenasClient.ISCSIExtentCreate(
-		ctx,
-		iscsiName,
-		diskPath,
-		comment,
-		d.config.ISCSI.ExtentBlocksize,
-		d.config.ISCSI.ExtentRpm,
-	)
-	if err != nil {
-		if delErr := d.truenasClient.ISCSITargetDelete(ctx, target.ID, true); delErr != nil {
-			klog.Warningf("Failed to cleanup iSCSI target: %v", delErr)
+	// Step 1: Check if already fully configured (idempotency fast-path)
+	existingTE, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSITargetExtentID)
+	if existingTE != "" && existingTE != "-" {
+		// Verify the target-extent still exists
+		teID, err := strconv.Atoi(existingTE)
+		if err == nil {
+			if _, err := d.truenasClient.ISCSITargetExtentFind(ctx, 0, 0); err == nil {
+				klog.Infof("iSCSI share already fully configured for %s (targetextent=%d)", datasetName, teID)
+				return nil
+			}
 		}
-		return status.Errorf(codes.Internal, "failed to create iSCSI extent: %v", err)
-	}
-	if err := d.truenasClient.DatasetSetUserProperty(ctx, datasetName, PropISCSIExtentID, strconv.Itoa(extent.ID)); err != nil {
-		return status.Errorf(codes.Internal, "failed to store iSCSI extent ID: %v", err)
+		klog.V(4).Infof("Stored target-extent ID %s invalid or not found, will recreate", existingTE)
 	}
 
-	// Create target-extent association
-	targetExtent, err := d.truenasClient.ISCSITargetExtentCreate(ctx, target.ID, extent.ID, 0)
-	if err != nil {
-		if delErr := d.truenasClient.ISCSIExtentDelete(ctx, extent.ID, false, true); delErr != nil {
-			klog.Warningf("Failed to cleanup iSCSI extent: %v", delErr)
+	// Step 2: Find or create target (idempotent)
+	var target *truenas.ISCSITarget
+	var targetID int
+
+	// Check if we have a stored target ID
+	existingTargetID, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSITargetID)
+	if existingTargetID != "" && existingTargetID != "-" {
+		if id, err := strconv.Atoi(existingTargetID); err == nil {
+			if t, err := d.truenasClient.ISCSITargetGet(ctx, id); err == nil {
+				target = t
+				targetID = t.ID
+				klog.V(4).Infof("Using existing target ID %d for %s", targetID, datasetName)
+			}
 		}
-		if delErr := d.truenasClient.ISCSITargetDelete(ctx, target.ID, true); delErr != nil {
-			klog.Warningf("Failed to cleanup iSCSI target: %v", delErr)
-		}
-		return status.Errorf(codes.Internal, "failed to create target-extent association: %v", err)
 	}
+
+	// If no stored target, check by name
+	if target == nil {
+		if t, err := d.truenasClient.ISCSITargetFindByName(ctx, iscsiName); err == nil && t != nil {
+			target = t
+			targetID = t.ID
+			klog.V(4).Infof("Found existing target by name %s (ID %d)", iscsiName, targetID)
+		}
+	}
+
+	// Create target if needed
+	if target == nil {
+		targetGroups := []truenas.ISCSITargetGroup{}
+		for _, tg := range d.config.ISCSI.TargetGroups {
+			var auth *int
+			if tg.Auth != nil && *tg.Auth > 0 {
+				auth = tg.Auth
+			}
+			targetGroups = append(targetGroups, truenas.ISCSITargetGroup{
+				Portal:     tg.Portal,
+				Initiator:  tg.Initiator,
+				AuthMethod: tg.AuthMethod,
+				Auth:       auth,
+			})
+		}
+
+		var err error
+		target, err = d.truenasClient.ISCSITargetCreate(ctx, iscsiName, "", "ISCSI", targetGroups)
+		if err != nil {
+			return status.Errorf(codes.Internal, "failed to create iSCSI target: %v", err)
+		}
+		targetID = target.ID
+		klog.Infof("Created iSCSI target %s (ID %d)", iscsiName, targetID)
+	}
+
+	// Store target ID
+	if err := d.truenasClient.DatasetSetUserProperty(ctx, datasetName, PropISCSITargetID, strconv.Itoa(targetID)); err != nil {
+		klog.Warningf("Failed to store iSCSI target ID: %v", err)
+	}
+
+	// Step 3: Wait for zvol to be ready before creating extent
+	// This is critical for cloned volumes which may not be immediately available
+	klog.V(4).Infof("Waiting for zvol %s to be ready before creating extent", datasetName)
+	if _, err := d.truenasClient.WaitForZvolReady(ctx, datasetName, zvolReadyTimeout); err != nil {
+		klog.Warningf("Zvol readiness check failed (will attempt extent creation anyway): %v", err)
+	}
+
+	// Step 4: Find or create extent with retry (idempotent)
+	var extent *truenas.ISCSIExtent
+	var extentID int
+
+	// Check if we have a stored extent ID
+	existingExtentID, _ := d.truenasClient.DatasetGetUserProperty(ctx, datasetName, PropISCSIExtentID)
+	if existingExtentID != "" && existingExtentID != "-" {
+		if id, err := strconv.Atoi(existingExtentID); err == nil {
+			if e, err := d.truenasClient.ISCSIExtentGet(ctx, id); err == nil {
+				extent = e
+				extentID = e.ID
+				klog.V(4).Infof("Using existing extent ID %d for %s", extentID, datasetName)
+			}
+		}
+	}
+
+	// If no stored extent, check by disk path (more reliable than name for clones)
+	if extent == nil {
+		if e, err := d.truenasClient.ISCSIExtentFindByDisk(ctx, diskPath); err == nil && e != nil {
+			extent = e
+			extentID = e.ID
+			klog.V(4).Infof("Found existing extent by disk path %s (ID %d)", diskPath, extentID)
+		}
+	}
+
+	// If still no extent, check by name
+	if extent == nil {
+		if e, err := d.truenasClient.ISCSIExtentFindByName(ctx, iscsiName); err == nil && e != nil {
+			extent = e
+			extentID = e.ID
+			klog.V(4).Infof("Found existing extent by name %s (ID %d)", iscsiName, extentID)
+		}
+	}
+
+	// Create extent with retry logic
+	if extent == nil {
+		comment := fmt.Sprintf("truenas-csi: %s", datasetName)
+		var lastErr error
+
+		for attempt := 0; attempt < defaultShareRetryAttempts; attempt++ {
+			if attempt > 0 {
+				delay := defaultShareRetryDelay * time.Duration(1<<uint(attempt-1))
+				klog.V(4).Infof("Retrying extent creation for %s (attempt %d/%d, delay %v)", datasetName, attempt+1, defaultShareRetryAttempts, delay)
+				select {
+				case <-time.After(delay):
+				case <-ctx.Done():
+					return status.Errorf(codes.DeadlineExceeded, "context cancelled during extent creation retry")
+				}
+			}
+
+			var err error
+			extent, err = d.truenasClient.ISCSIExtentCreate(
+				ctx,
+				iscsiName,
+				diskPath,
+				comment,
+				d.config.ISCSI.ExtentBlocksize,
+				d.config.ISCSI.ExtentRpm,
+			)
+			if err == nil {
+				extentID = extent.ID
+				klog.Infof("Created iSCSI extent %s (ID %d) on attempt %d", iscsiName, extentID, attempt+1)
+				break
+			}
+			lastErr = err
+			klog.Warningf("Extent creation attempt %d failed for %s: %v", attempt+1, datasetName, err)
+
+			// Check if extent was actually created despite error
+			if e, findErr := d.truenasClient.ISCSIExtentFindByDisk(ctx, diskPath); findErr == nil && e != nil {
+				extent = e
+				extentID = e.ID
+				klog.Infof("Extent found after error (ID %d), continuing", extentID)
+				break
+			}
+		}
+
+		if extent == nil {
+			// Cleanup target on failure
+			if delErr := d.truenasClient.ISCSITargetDelete(ctx, targetID, true); delErr != nil {
+				klog.Warningf("Failed to cleanup iSCSI target after extent creation failure: %v", delErr)
+			}
+			return status.Errorf(codes.Internal, "failed to create iSCSI extent after %d attempts: %v", defaultShareRetryAttempts, lastErr)
+		}
+	}
+
+	// Store extent ID
+	if err := d.truenasClient.DatasetSetUserProperty(ctx, datasetName, PropISCSIExtentID, strconv.Itoa(extentID)); err != nil {
+		klog.Warningf("Failed to store iSCSI extent ID: %v", err)
+	}
+
+	// Step 5: Find or create target-extent association (idempotent)
+	var targetExtent *truenas.ISCSITargetExtent
+
+	// Check if association already exists
+	if te, err := d.truenasClient.ISCSITargetExtentFind(ctx, targetID, extentID); err == nil && te != nil {
+		targetExtent = te
+		klog.V(4).Infof("Using existing target-extent association (ID %d)", te.ID)
+	}
+
+	// Create association if needed
+	if targetExtent == nil {
+		var err error
+		targetExtent, err = d.truenasClient.ISCSITargetExtentCreate(ctx, targetID, extentID, 0)
+		if err != nil {
+			// Don't cleanup target/extent as they may be reusable
+			klog.Errorf("Failed to create target-extent association: %v", err)
+			return status.Errorf(codes.Internal, "failed to create target-extent association: %v", err)
+		}
+		klog.Infof("Created target-extent association (ID %d)", targetExtent.ID)
+	}
+
+	// Store target-extent ID
 	if err := d.truenasClient.DatasetSetUserProperty(ctx, datasetName, PropISCSITargetExtentID, strconv.Itoa(targetExtent.ID)); err != nil {
-		return status.Errorf(codes.Internal, "failed to store iSCSI target-extent ID: %v", err)
+		klog.Warningf("Failed to store iSCSI target-extent ID: %v", err)
 	}
 
-	klog.Infof("Created iSCSI target=%d, extent=%d, targetextent=%d for %s", target.ID, extent.ID, targetExtent.ID, datasetName)
+	klog.Infof("iSCSI share setup complete for %s: target=%d, extent=%d, targetextent=%d (took %v)",
+		datasetName, targetID, extentID, targetExtent.ID, time.Since(start))
 	return nil
 }
 

@@ -2,6 +2,7 @@ package truenas
 
 import (
 	"context"
+	"time"
 )
 
 // ClientInterface defines the interface for the TrueNAS API client.
@@ -22,7 +23,10 @@ type ClientInterface interface {
 	DatasetSetUserProperty(ctx context.Context, name string, key string, value string) error
 	DatasetGetUserProperty(ctx context.Context, name string, key string) (string, error)
 	DatasetExpand(ctx context.Context, name string, newSize int64) error
+	DatasetExists(ctx context.Context, name string) (bool, error)
 	GetPoolAvailable(ctx context.Context, poolName string) (int64, error)
+	WaitForDatasetReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error)
+	WaitForZvolReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error)
 
 	// Snapshot methods
 	SnapshotCreate(ctx context.Context, dataset string, name string) (*Snapshot, error)
@@ -52,9 +56,11 @@ type ClientInterface interface {
 	ISCSIExtentDelete(ctx context.Context, id int, remove bool, force bool) error
 	ISCSIExtentGet(ctx context.Context, id int) (*ISCSIExtent, error)
 	ISCSIExtentFindByName(ctx context.Context, name string) (*ISCSIExtent, error)
+	ISCSIExtentFindByDisk(ctx context.Context, diskPath string) (*ISCSIExtent, error)
 	ISCSITargetExtentCreate(ctx context.Context, targetID int, extentID int, lunID int) (*ISCSITargetExtent, error)
 	ISCSITargetExtentDelete(ctx context.Context, id int, force bool) error
 	ISCSITargetExtentFind(ctx context.Context, targetID int, extentID int) (*ISCSITargetExtent, error)
+	ISCSITargetExtentFindByTarget(ctx context.Context, targetID int) ([]*ISCSITargetExtent, error)
 	ISCSIGlobalConfigGet(ctx context.Context) (*ISCSIGlobalConfig, error)
 
 	// NVMe-oF methods

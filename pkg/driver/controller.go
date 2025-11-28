@@ -6,6 +6,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sync/errgroup"
@@ -114,12 +115,22 @@ func (d *Driver) ControllerGetCapabilities(ctx context.Context, req *csi.Control
 
 // CreateVolume creates a new volume.
 func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	start := time.Now()
 	name := req.GetName()
 	if name == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume name is required")
 	}
 
-	klog.Infof("CreateVolume: name=%s", name)
+	// Enhanced logging for debugging volsync and backup scenarios
+	contentSourceInfo := "none"
+	if src := req.GetVolumeContentSource(); src != nil {
+		if snap := src.GetSnapshot(); snap != nil {
+			contentSourceInfo = fmt.Sprintf("snapshot:%s", snap.GetSnapshotId())
+		} else if vol := src.GetVolume(); vol != nil {
+			contentSourceInfo = fmt.Sprintf("volume:%s", vol.GetVolumeId())
+		}
+	}
+	klog.Infof("CreateVolume: name=%s, contentSource=%s", name, contentSourceInfo)
 
 	// Lock on volume name to prevent concurrent creates
 	lockKey := "volume:" + name
@@ -257,7 +268,8 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "failed to get volume context: %v", err)
 	}
 
-	klog.Infof("Volume %s created successfully", volumeID)
+	klog.Infof("CreateVolume completed: volume=%s, shareType=%s, contentSource=%s, elapsed=%v",
+		volumeID, shareType, contentSourceInfo, time.Since(start))
 
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
@@ -444,6 +456,7 @@ func (d *Driver) GetCapacity(ctx context.Context, req *csi.GetCapacityRequest) (
 
 // CreateSnapshot creates a snapshot.
 func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	start := time.Now()
 	sourceVolumeID := req.GetSourceVolumeId()
 	if sourceVolumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "source volume ID is required")
@@ -498,13 +511,15 @@ func (d *Driver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequ
 		return nil, status.Errorf(codes.Internal, "failed to set snapshot properties: %v", err)
 	}
 
-	klog.Infof("Snapshot %s created successfully", snapshotID)
+	snapshotSize := snap.GetSnapshotSize()
+	klog.Infof("CreateSnapshot completed: snapshot=%s, sourceVolume=%s, size=%d, elapsed=%v",
+		snapshotID, sourceVolumeID, snapshotSize, time.Since(start))
 
 	return &csi.CreateSnapshotResponse{
 		Snapshot: &csi.Snapshot{
 			SnapshotId:     snapshotID,
 			SourceVolumeId: sourceVolumeID,
-			SizeBytes:      snap.GetSnapshotSize(),
+			SizeBytes:      snapshotSize,
 			CreationTime:   timestampProto(snap.GetCreationTime()),
 			ReadyToUse:     true,
 		},
@@ -783,9 +798,13 @@ func (d *Driver) createDataset(ctx context.Context, datasetName string, capacity
 }
 
 func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName string, source *csi.VolumeContentSource, capacityBytes int64) error {
+	// Timeout for waiting for cloned dataset to be ready
+	const cloneReadyTimeout = 30 * time.Second
+
 	if snapshot := source.GetSnapshot(); snapshot != nil {
 		// Clone from snapshot
 		snapshotID := snapshot.GetSnapshotId()
+		klog.Infof("Creating volume from snapshot: %s -> %s", snapshotID, datasetName)
 
 		// Find the snapshot using efficient query (PERF-001 fix)
 		snap, err := d.truenasClient.SnapshotFindByName(ctx, d.config.ZFS.DatasetParentName, snapshotID)
@@ -798,9 +817,30 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 		}
 
 		sourceSnapshot := snap.ID
+		klog.V(4).Infof("Found snapshot %s for cloning", sourceSnapshot)
 
 		if err := d.truenasClient.SnapshotClone(ctx, sourceSnapshot, datasetName); err != nil {
 			return status.Errorf(codes.Internal, "failed to clone snapshot: %v", err)
+		}
+		klog.Infof("Snapshot clone created: %s -> %s", sourceSnapshot, datasetName)
+
+		// Wait for cloned dataset to be ready before proceeding
+		// This is critical for iSCSI/NVMe-oF where extent creation needs the zvol
+		ds, err := d.truenasClient.WaitForZvolReady(ctx, datasetName, cloneReadyTimeout)
+		if err != nil {
+			klog.Warningf("Clone readiness check failed (will continue): %v", err)
+		} else {
+			// Check if we need to expand the cloned volume to match requested capacity
+			if ds.Type == "VOLUME" && capacityBytes > 0 {
+				if currentSize, ok := ds.Volsize.Parsed.(float64); ok {
+					if capacityBytes > int64(currentSize) {
+						klog.Infof("Expanding cloned zvol from %d to %d bytes", int64(currentSize), capacityBytes)
+						if err := d.truenasClient.DatasetExpand(ctx, datasetName, capacityBytes); err != nil {
+							klog.Warningf("Failed to expand cloned zvol (will continue with original size): %v", err)
+						}
+					}
+				}
+			}
 		}
 
 		// Set content source properties in parallel (BUG-004 fix: log errors from Wait)
@@ -825,6 +865,7 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 		// Clone from volume
 		sourceVolumeID := volume.GetVolumeId()
 		sourceDataset := path.Join(d.config.ZFS.DatasetParentName, sourceVolumeID)
+		klog.Infof("Creating volume from volume: %s -> %s", sourceVolumeID, datasetName)
 
 		// Create a snapshot of source volume, then clone it
 		tempSnapshotName := fmt.Sprintf("clone-source-%s", d.sanitizeVolumeID(path.Base(datasetName)))
@@ -832,12 +873,32 @@ func (d *Driver) handleVolumeContentSource(ctx context.Context, datasetName stri
 		if err != nil {
 			return status.Errorf(codes.Internal, "failed to create source snapshot: %v", err)
 		}
+		klog.V(4).Infof("Created temporary snapshot %s for volume clone", snap.ID)
 
 		if err := d.truenasClient.SnapshotClone(ctx, snap.ID, datasetName); err != nil {
 			if delErr := d.truenasClient.SnapshotDelete(ctx, snap.ID, false, false); delErr != nil {
 				klog.Warningf("Failed to cleanup snapshot after clone failure: %v", delErr)
 			}
 			return status.Errorf(codes.Internal, "failed to clone volume: %v", err)
+		}
+		klog.Infof("Volume clone created: %s -> %s", sourceVolumeID, datasetName)
+
+		// Wait for cloned dataset to be ready
+		ds, err := d.truenasClient.WaitForZvolReady(ctx, datasetName, cloneReadyTimeout)
+		if err != nil {
+			klog.Warningf("Clone readiness check failed (will continue): %v", err)
+		} else {
+			// Check if we need to expand the cloned volume
+			if ds.Type == "VOLUME" && capacityBytes > 0 {
+				if currentSize, ok := ds.Volsize.Parsed.(float64); ok {
+					if capacityBytes > int64(currentSize) {
+						klog.Infof("Expanding cloned zvol from %d to %d bytes", int64(currentSize), capacityBytes)
+						if err := d.truenasClient.DatasetExpand(ctx, datasetName, capacityBytes); err != nil {
+							klog.Warningf("Failed to expand cloned zvol (will continue with original size): %v", err)
+						}
+					}
+				}
+			}
 		}
 
 		// Set content source properties in parallel (BUG-004 fix: log errors from Wait)

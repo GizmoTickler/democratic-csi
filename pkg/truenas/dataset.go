@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"k8s.io/klog/v2"
 )
 
 // Dataset represents a ZFS dataset from the TrueNAS API.
@@ -349,4 +352,104 @@ func parseProperty(data interface{}) DatasetProperty {
 	}
 
 	return prop
+}
+
+// WaitForDatasetReady waits for a dataset to be available and queryable.
+// This is important after clone operations where the dataset may not be
+// immediately available for subsequent operations.
+func (c *Client) WaitForDatasetReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error) {
+	start := time.Now()
+	pollInterval := 100 * time.Millisecond
+	maxPollInterval := 2 * time.Second
+
+	klog.V(4).Infof("Waiting for dataset %s to be ready (timeout: %v)", name, timeout)
+
+	var lastErr error
+	for {
+		ds, err := c.DatasetGet(ctx, name)
+		if err == nil && ds != nil {
+			klog.V(4).Infof("Dataset %s is ready (took %v)", name, time.Since(start))
+			return ds, nil
+		}
+		lastErr = err
+
+		if time.Since(start) > timeout {
+			return nil, fmt.Errorf("timeout waiting for dataset %s to be ready after %v: %w", name, timeout, lastErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled waiting for dataset: %w", ctx.Err())
+		case <-time.After(pollInterval):
+		}
+
+		// Exponential backoff
+		pollInterval *= 2
+		if pollInterval > maxPollInterval {
+			pollInterval = maxPollInterval
+		}
+	}
+}
+
+// WaitForZvolReady waits for a zvol to be ready with a valid volsize.
+// After cloning, the zvol may not immediately have all properties available.
+func (c *Client) WaitForZvolReady(ctx context.Context, name string, timeout time.Duration) (*Dataset, error) {
+	start := time.Now()
+	pollInterval := 100 * time.Millisecond
+	maxPollInterval := 2 * time.Second
+
+	klog.V(4).Infof("Waiting for zvol %s to be ready (timeout: %v)", name, timeout)
+
+	var lastErr error
+	for {
+		ds, err := c.DatasetGet(ctx, name)
+		if err == nil && ds != nil {
+			// Verify it's a VOLUME type and has a valid volsize
+			if ds.Type == "VOLUME" {
+				if volsize, ok := ds.Volsize.Parsed.(float64); ok && volsize > 0 {
+					klog.V(4).Infof("Zvol %s is ready with volsize %d (took %v)", name, int64(volsize), time.Since(start))
+					return ds, nil
+				}
+				klog.V(4).Infof("Zvol %s exists but volsize not ready yet", name)
+			} else {
+				// It's a filesystem, which is also valid for NFS
+				klog.V(4).Infof("Dataset %s is ready as type %s (took %v)", name, ds.Type, time.Since(start))
+				return ds, nil
+			}
+		}
+		if err != nil {
+			lastErr = err
+		}
+
+		if time.Since(start) > timeout {
+			if lastErr != nil {
+				return nil, fmt.Errorf("timeout waiting for zvol %s to be ready after %v: %w", name, timeout, lastErr)
+			}
+			return nil, fmt.Errorf("timeout waiting for zvol %s to be ready after %v", name, timeout)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("context cancelled waiting for zvol: %w", ctx.Err())
+		case <-time.After(pollInterval):
+		}
+
+		// Exponential backoff
+		pollInterval *= 2
+		if pollInterval > maxPollInterval {
+			pollInterval = maxPollInterval
+		}
+	}
+}
+
+// DatasetExists checks if a dataset exists without returning an error for not found.
+func (c *Client) DatasetExists(ctx context.Context, name string) (bool, error) {
+	_, err := c.DatasetGet(ctx, name)
+	if err != nil {
+		if IsNotFoundError(err) || strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
